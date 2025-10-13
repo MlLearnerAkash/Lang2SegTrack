@@ -30,7 +30,7 @@ SAM_MODELS = {
 }
 
 class SAM:
-    def build_model(self, sam_type: str, ckpt_path: str | None = None, predictor_type="img", device=torch.device('cuda:0')):
+    def build_model(self, sam_type: str, ckpt_path: str | None = None, predictor_type="img", device=torch.device('cuda:0'), use_txt_prompt=False):
         self.sam_type = sam_type
         self.ckpt_path = ckpt_path
         if predictor_type == "img":
@@ -39,6 +39,10 @@ class SAM:
             self.img_predictor = SAM2ImagePredictor(self.model)
         elif predictor_type == "video" or predictor_type == "realtime":
             self.video_predictor = build_sam2_video_predictor(SAM_MODELS[self.sam_type]["config"], self.ckpt_path, device=device)
+            # if use_txt_prompt:
+            #     self.model = build_sam2(config_file=SAM_MODELS[self.sam_type]["config"], ckpt_path=self.ckpt_path, device=device)
+            #     self.mask_generator = SAM2AutomaticMaskGenerator(self.model)
+            #     self.img_predictor = SAM2ImagePredictor(self.model)
 
     def _load_checkpoint(self, model: torch.nn.Module):
         if self.ckpt_path is None:

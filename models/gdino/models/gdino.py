@@ -77,9 +77,10 @@ if __name__ == "__main__":
     gdino = GDINO()
     gdino.build_model()
     out = gdino.predict(
-        [Image.open("/home/jj/JKW/samurai/first_frame.png")],
-        ["tennis ball"],
+        [Image.open("assets/frame_00000.jpg")],
+        ["football.shoes"],
         0.3,
         0.25,
     )
+    # [{'scores': tensor([...]), 'labels': [...], 'boxes': tensor([...])}]
     print(out)

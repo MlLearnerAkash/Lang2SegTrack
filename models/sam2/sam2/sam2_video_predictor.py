@@ -6,11 +6,13 @@ import gc
 
 import warnings
 from collections import OrderedDict
+from typing import List, Union, Tuple
 
 import cv2
 import numpy as np
 import torch
 import torchvision.transforms.functional as TF
+from numpy.matlib import empty
 from tqdm import tqdm
 
 from sam2.modeling.sam2_base import NO_OBJ_SCORE, SAM2Base
@@ -131,39 +133,40 @@ class SAM2VideoPredictor(SAM2Base):
         return inference_state
 
 
-    def release_old_frames(self, inference_state, frame_idx, max_inference_state_frames, pre_frames, release_images=False):
-        oldest_allowed_idx = frame_idx - max_inference_state_frames
+    def release_old_frames(self, inference_state, release_images=True):
+        if inference_state['output_dict']['cond_frame_outputs']:
+            all_cond_frames_idx = inference_state['output_dict']['cond_frame_outputs'].keys()
+            oldest_allowed_idx = max(all_cond_frames_idx) - 10
+            all_non_cond_frames_idx = inference_state['output_dict']['non_cond_frame_outputs'].keys()
+            old_cond_frames_idx = [idx for idx in all_cond_frames_idx if idx < oldest_allowed_idx]
+            old_non_cond_frames_idx = [idx for idx in all_non_cond_frames_idx if idx < oldest_allowed_idx]
 
-        all_cond_frames_idx = inference_state['output_dict']['cond_frame_outputs'].keys()
-        all_non_cond_frames_idx = inference_state['output_dict']['non_cond_frame_outputs'].keys()
-        old_cond_frames_idx = [idx for idx in all_cond_frames_idx if (pre_frames - 1) < idx <= oldest_allowed_idx]
-        old_non_cond_frames_idx = [idx for idx in all_non_cond_frames_idx if (pre_frames - 1) < idx <= oldest_allowed_idx]
+            for old_idx in old_non_cond_frames_idx:
+                inference_state['output_dict']['non_cond_frame_outputs'].pop(old_idx,None)
+                for obj in inference_state['output_dict_per_obj'].keys():
+                    inference_state['output_dict_per_obj'][obj]['non_cond_frame_outputs'].pop(old_idx,None)
 
-        for old_idx in old_non_cond_frames_idx:
-            inference_state['output_dict']['non_cond_frame_outputs'].pop(old_idx,None)
-            for obj in inference_state['output_dict_per_obj'].keys():
-                inference_state['output_dict_per_obj'][obj]['non_cond_frame_outputs'].pop(old_idx,None)
+            for old_idx in old_cond_frames_idx:
+                inference_state['output_dict']['cond_frame_outputs'].pop(old_idx,None)
+                inference_state['consolidated_frame_inds']['cond_frame_outputs'].discard(old_idx)
+                for obj in inference_state['output_dict_per_obj'].keys():
+                    inference_state['output_dict_per_obj'][obj]['cond_frame_outputs'].pop(old_idx,None)
 
-        for old_idx in old_cond_frames_idx:
-            inference_state['output_dict']['cond_frame_outputs'].pop(old_idx,None)
-            inference_state['consolidated_frame_inds']['cond_frame_outputs'].discard(old_idx)
-            for obj in inference_state['output_dict_per_obj'].keys():
-                inference_state['output_dict_per_obj'][obj]['cond_frame_outputs'].pop(old_idx,None)
+            if release_images:
+                old_image_indices = [idx for idx in inference_state["images_idx"] if idx < oldest_allowed_idx]
 
-        if release_images:
-            old_image_indices = [idx for idx in inference_state["images_idx"] if (pre_frames - 1) < idx <= oldest_allowed_idx]
+                image_idx_to_remove = []
+                for old_idx in old_image_indices:
+                    inference_state["cached_features"].pop(old_idx, None)
+                    old_image_idx = inference_state["images_idx"].index(old_idx)  # 需要被删除的真实视频帧索引转化为images中对应索引
+                    image_idx_to_remove.append(old_image_idx)
 
-            image_idx_to_remove = []
-            for old_idx in old_image_indices:
-                old_image_idx = inference_state["images_idx"].index(old_idx)  # 需要被删除的真实视频帧索引转化为images中对应索引
-                image_idx_to_remove.append(old_image_idx)
+                mask = torch.tensor([i for i in range(inference_state["images"].size(0)) if i not in image_idx_to_remove])
+                mask = mask.to(inference_state["images"].device)
+                inference_state["images"] = torch.index_select(inference_state["images"], dim=0, index=mask)
+                inference_state["images_idx"] = [idx for idx in inference_state["images_idx"] if idx not in old_image_indices]
 
-            mask = torch.tensor([i for i in range(inference_state["images"].size(0)) if i not in image_idx_to_remove])
-            mask = mask.to(inference_state["images"].device)
-            inference_state["images"] = torch.index_select(inference_state["images"], dim=0, index=mask)
-            inference_state["images_idx"] = [idx for idx in inference_state["images_idx"] if idx not in old_image_indices]
-
-            assert len(inference_state["images"]) == len(inference_state["images_idx"])  # 确保images和images_idx长度一致
+                assert len(inference_state["images"]) == len(inference_state["images_idx"])  # 确保images和images_idx长度一致
 
         gc.collect()
 
@@ -208,6 +211,7 @@ class SAM2VideoPredictor(SAM2Base):
         )
         inference_state = {}
         inference_state["images"] = images
+        inference_state["images_idx"] = list(range(len(images)))
         inference_state["num_frames"] = len(images)
         # whether to offload the video frames to CPU memory
         # turning on this option saves the GPU memory with only a very small overhead
@@ -461,10 +465,6 @@ class SAM2VideoPredictor(SAM2Base):
             inference_state, consolidated_out["pred_masks_video_res"]
         )
         return frame_idx, obj_ids, video_res_masks
-
-    def add_new_points(self, *args, **kwargs):
-        """Deprecated method. Please use `add_new_points_or_box` instead."""
-        return self.add_new_points_or_box(*args, **kwargs)
 
     @torch.inference_mode()
     def add_new_mask(
@@ -895,6 +895,63 @@ class SAM2VideoPredictor(SAM2Base):
                 inference_state, pred_masks
             )
             yield frame_idx, obj_ids, video_res_masks
+
+    def propagate_in_frame(
+            self,
+            inference_state,
+            start_frame_idx=None,
+            reverse=False,
+    ):
+        self.propagate_in_video_preflight(inference_state)
+
+        output_dict = inference_state["output_dict"]
+        consolidated_frame_inds = inference_state["consolidated_frame_inds"]
+        obj_ids = inference_state["obj_ids"]
+        batch_size = self._get_obj_num(inference_state)
+        if len(output_dict["cond_frame_outputs"]) == 0:
+            raise RuntimeError("No points are provided; please add points first")
+        clear_non_cond_mem = self.clear_non_cond_mem_around_input and (
+                self.clear_non_cond_mem_for_multi_obj or batch_size <= 1
+        )
+
+        if start_frame_idx in consolidated_frame_inds["cond_frame_outputs"]:
+            storage_key = "cond_frame_outputs"
+            current_out = output_dict[storage_key][start_frame_idx]
+            pred_masks = current_out["pred_masks"]
+            if clear_non_cond_mem:
+                # clear non-conditioning memory of the surrounding frames
+                self._clear_non_cond_mem_around_input(inference_state, start_frame_idx)
+        elif start_frame_idx in consolidated_frame_inds["non_cond_frame_outputs"]:
+            storage_key = "non_cond_frame_outputs"
+            current_out = output_dict[storage_key][start_frame_idx]
+            pred_masks = current_out["pred_masks"]
+        else:
+            storage_key = "non_cond_frame_outputs"
+            current_out, pred_masks = self._run_single_frame_inference(
+                inference_state=inference_state,
+                output_dict=output_dict,
+                frame_idx=start_frame_idx,
+                batch_size=batch_size,
+                is_init_cond_frame=False,
+                point_inputs=None,
+                mask_inputs=None,
+                reverse=reverse,
+                run_mem_encoder=True,
+            )
+            output_dict[storage_key][start_frame_idx] = current_out
+        # Create slices of per-object outputs for subsequent interaction with each
+        # individual object after tracking.
+        self._add_output_per_object(
+            inference_state, start_frame_idx, current_out, storage_key
+        )
+        inference_state["frames_already_tracked"][start_frame_idx] = {"reverse": reverse}
+
+        # Resize the output mask to the original video resolution (we directly use
+        # the mask scores on GPU for output to avoid any CPU conversion in between)
+        _, video_res_masks = self._get_orig_video_res_output(
+            inference_state, pred_masks
+        )
+        yield start_frame_idx, obj_ids, video_res_masks
 
     def _add_output_per_object(
         self, inference_state, frame_idx, current_out, storage_key

@@ -184,6 +184,9 @@ def main(args, bbox_list:list[list[float]]):
 
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                 writer.append_data(img)
+        if (state["num_frames"] - 1) % 60 and len(state["output_dict"]["non_cond_frame_outputs"]) != 0:
+            predictor.append_frame_as_cond_frame(state, state["num_frames"] - 1)
+        predictor.release_old_frames(state, state["num_frames"] - 1, 60, 0, release_images=True)
 
         if args.save_to_video:
             writer.close()
@@ -196,14 +199,14 @@ def main(args, bbox_list:list[list[float]]):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--video_path", default="assets/05_default_juggle.mp4")
+    parser.add_argument("--video_path", default="06.mp4")
     parser.add_argument("--model_path", default="models/sam2/checkpoints/sam2.1_hiera_tiny.pt", help="Path to the model checkpoint.")
     parser.add_argument("--video_output_path", default="processed_video.mp4", help="Path to save the output video.")
     parser.add_argument("--save_to_video", default=True, help="Save results to a video.")
     parser.add_argument("--mask_dir", help="If provided, save mask images to the given directory")
     parser.add_argument("--device", default="cuda:0")
     args = parser.parse_args()
-    main(args, bbox_list=[[607.75244140625, 126.3901596069336, 791.4397583007812, 356.09332275390625],
+    process_video_in_chunks(args, [[607.75244140625, 126.3901596069336, 791.4397583007812, 356.09332275390625],
                           [612.8888549804688, 284.82171630859375, 692.8299560546875, 362.6283874511719],
                           [638.74560546875, 598.923095703125, 687.992431640625, 663.7514038085938],
                           [733.8016357421875, 612.997314453125, 782.0617065429688, 671.3180541992188],
