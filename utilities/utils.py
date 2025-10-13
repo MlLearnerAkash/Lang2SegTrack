@@ -6,7 +6,7 @@ import imageio
 import numpy as np
 from PIL import Image
 
-from utils.color import COLOR
+from utilities.color import COLOR
 
 
 def visualize_selected_masks_as_video(selected_obj_ids: list = [], masks_dir: str = "mask_outputs",
