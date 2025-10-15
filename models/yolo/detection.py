@@ -4,13 +4,13 @@ from pathlib import Path
 import cv2
 import time
 from ultralytics import YOLO
-
+from icecream import ic
 
 class YOLODetector:
     """
     YOLO object detector class that loads models and performs inference.
     """
-    def __init__(self, model_path, conf_thres=0.25, iou_thres=0.45, device='cuda:0'):
+    def __init__(self, model_path, conf_thres=0.45, iou_thres=0.25, device='cuda:0'):
         """
         Initialize the YOLO detector with a model.
 
@@ -85,37 +85,36 @@ class YOLODetector:
             boxes = []
             scores = []
             classes = []
-            
-            for result in results:
-                if result.boxes is not None and len(result.boxes) > 0:
-                    for box in result.boxes:
-                        x1, y1, x2, y2 = box.xyxy[0]#.cpu().numpy()
-                        conf = box.conf[0]#.cpu().numpy()
-                        cls = int(box.cls[0].cpu().numpy())
-                        
-                        boxes.append([x1, y1, x2, y2])
-                        scores.append(conf)
-                        classes.append(cls)
-        
-        
-            results = {
-                "boxes": boxes,
-                "scores": scores,
-                "labels": classes,
-                "names": [self.names[c] for c in classes],
-                "time": time.time() - start_time
-            }
-        else:
-            results = {
-                "boxes": np.array([]),
-                "scores": np.array([]),
-                "labels": np.array([]),
-                "names": [],
-                "time": time.time() - start_time
-            }
+            if results is not None and len(results) > 0:
+                for result in results:
+                    if result.boxes is not None and len(result.boxes) > 0:
+                        for box in result.boxes:
+                            x1, y1, x2, y2 = box.xyxy[0]#.cpu().numpy()
+                            conf = box.conf[0]#.cpu().numpy()
+                            cls = int(box.cls[0].cpu().numpy())
+                            
+                            boxes.append([x1, y1, x2, y2])
+                            scores.append(conf)
+                            classes.append(cls)
+                            
+                    results = {
+                        "boxes": torch.tensor(boxes, device=self.device) if boxes else torch.empty((0, 4), device=self.device),
+                        "scores": torch.tensor(scores, device=self.device) if scores else torch.empty(0, device=self.device),
+                        "labels": classes,
+                        "names": [self.names[c] for c in classes],
+                        "time": time.time() - start_time
+                        }
+            else:
+                results = {
+                    "boxes": np.array([]),
+                    "scores": np.array([]),
+                    "labels": np.array([]),
+                    "names": [],
+                    "time": time.time() - start_time
+                }
             
         batch_results.append(results)
-
+        ic(batch_results)
         return batch_results if is_batch else batch_results[0]
     
     

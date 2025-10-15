@@ -394,13 +394,14 @@ class Lang2SegTrack:
                             [self.current_text_prompt],
                             0.4, 0.25
                         )[0]
+                        # ic(detection)
                         detection= self.yolo.detect([frame])[0]
-                        ic(detection)
+                        # ic(detection)
                         
-
-                        scores = detection['scores'].cpu().numpy() if hasattr(detection['scores'], 'cpu') else detection['scores']
-                        labels = detection['labels'].cpu().numpy() if hasattr(detection['labels'], 'cpu') else detection['labels']
-                        boxes = detection['boxes'].cpu().numpy().tolist() if hasattr(detection['boxes'], 'cpu') else detection['boxes']
+                        
+                        scores = detection['scores'].cpu().numpy() #if hasattr(detection['scores'], 'cpu') else detection['scores']
+                        labels = detection['labels']#.cpu().numpy() #if hasattr(detection['labels'], 'cpu') else detection['labels']
+                        boxes = detection['boxes'].cpu().numpy().tolist() #if hasattr(detection['boxes'], 'cpu') else detection['boxes']
 
                         boxes_np = np.array(boxes, dtype=np.int32)
                         labels_np = np.array(labels)
