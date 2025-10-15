@@ -15,7 +15,7 @@ import numpy as np
 import imageio
 from PIL import Image
 from triton.language import dtype
-
+from icecream import ic
 
 from models.gdino.models.gdino import GDINO
 from models.sam2.sam import SAM
@@ -30,7 +30,8 @@ from utilities.ObjectInfoManager import ObjectInfoManager
 class Lang2SegTrack:
     def __init__(self, sam_type:str="sam2.1_hiera_tiny", model_path:str="models/sam2/checkpoints/sam2.1_hiera_large.pt",
                  video_path:str="", output_path:str="", use_txt_prompt:bool=False, max_frames:int=60,
-                 first_prompts: list | None = None, save_video=True, device="cuda:0", mode="realtime"):
+                 first_prompts: list | None = None, save_video=True, device="cuda:0", mode="realtime",
+                 yolo_path= "/data/dataset/weights/base_weight/weights/best_wo_specialised_training.pt"):
         self.sam_type = sam_type # the type of SAM model to use
         self.model_path = model_path # the path to the SAM model checkpoint
         self.video_path = video_path # the path to the video to track. If mode="video", this param is required.
@@ -43,19 +44,24 @@ class Lang2SegTrack:
         self.save_video = save_video # whether to save the output video
         self.device = device
         self.mode = mode # the mode to run the tracker. "video" or "realtime"
+        self.yolo_path = yolo_path
         if self.mode == 'img' and not use_txt_prompt:
             raise ValueError("In 'img' mode, use_txt_prompt must be True")
 
         self.sam = SAM()
+        self.yolo= YOLODetector(self.yolo_path)
         self.sam.build_model(self.sam_type, self.model_path, predictor_type=mode, device=device, use_txt_prompt=use_txt_prompt)
         if use_txt_prompt:
             self.gdino = GDINO()
+            
             self.gdino_16 = False
             if not self.gdino_16:
                 print("Building GroundingDINO model...")
                 self.gdino.build_model(device=device)
         else:
             self.gdino = None
+
+
 
         # data management
         self.history_frames = []
@@ -101,7 +107,7 @@ class Lang2SegTrack:
         elif event == cv2.EVENT_MOUSEMOVE and self.drawing:
             img = param.copy()
             cv2.rectangle(img, (self.ix, self.iy), (x, y), (0, 255, 0), 2)
-            cv2.imshow("Video Tracking", img)
+            # cv2.imshow("Video Tracking", img)
         elif event == cv2.EVENT_LBUTTONUP and self.drawing:
             if abs(x - self.ix) > 2 and abs(y - self.iy) > 2:
                 bbox = [self.ix, self.iy, x, y]
@@ -201,7 +207,7 @@ class Lang2SegTrack:
                 self.draw_mask_and_bbox(base_frame, mask, bbox, obj_id)
 
             writer.append_data(cv2.cvtColor(base_frame, cv2.COLOR_BGR2RGB))
-            cv2.imshow("Final Tracking Visualization", base_frame)
+            # cv2.imshow("Final Tracking Visualization", base_frame)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
 
@@ -232,6 +238,10 @@ class Lang2SegTrack:
                 "mask_scores": np.ndarray,
             }, ...]
         """
+        if self.yolo:
+            ic(">>>>>")
+            yolo_results= self.yolo.predict(images_pil)
+            ic(yolo_results)
         if self.gdino_16:
             if len(images_pil) > 1:
                 raise ValueError("GroundingDINO_16 only support single image")
@@ -243,6 +253,7 @@ class Lang2SegTrack:
             gdino_results = self.gdino.predict_dino_1_6_pro(base64_encoded, texts_prompt, box_threshold, text_threshold)
         else:
             gdino_results = self.gdino.predict(images_pil, texts_prompt, box_threshold, text_threshold)
+        
         all_results = []
         sam_images = []
         sam_boxes = []
@@ -383,9 +394,14 @@ class Lang2SegTrack:
                             [self.current_text_prompt],
                             0.4, 0.25
                         )[0]
-                        scores = detection['scores'].cpu().numpy()
-                        labels = detection['labels']
-                        boxes = detection['boxes'].cpu().numpy().tolist()
+                        detection= self.yolo.detect([frame])[0]
+                        ic(detection)
+                        
+
+                        scores = detection['scores'].cpu().numpy() if hasattr(detection['scores'], 'cpu') else detection['scores']
+                        labels = detection['labels'].cpu().numpy() if hasattr(detection['labels'], 'cpu') else detection['labels']
+                        boxes = detection['boxes'].cpu().numpy().tolist() if hasattr(detection['boxes'], 'cpu') else detection['boxes']
+
                         boxes_np = np.array(boxes, dtype=np.int32)
                         labels_np = np.array(labels)
                         scores_np = np.array(scores)
@@ -466,7 +482,7 @@ class Lang2SegTrack:
 if __name__ == "__main__":
     tracker = Lang2SegTrack(sam_type="sam2.1_hiera_tiny",
                             model_path="models/sam2/checkpoints/sam2.1_hiera_tiny.pt",
-                            video_path="assets/car.mp4",
+                            video_path="/data/dataset/demo_video/gauze-needle.mp4",
                             # video_path="assets/05_default_juggle.mp4",
                             output_path="forward_tracked_video.mp4",
                             mode="video",
