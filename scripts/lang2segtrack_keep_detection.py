@@ -49,7 +49,7 @@ class Lang2SegTrack:
             raise ValueError("In 'img' mode, use_txt_prompt must be True")
 
         self.sam = SAM()
-        self.yolo= YOLODetector(self.yolo_path, conf_thres= 0.75)
+        self.yolo= YOLODetector(self.yolo_path, conf_thres= 0.45)
         self.sam.build_model(self.sam_type, self.model_path, predictor_type=mode, device=device, use_txt_prompt=use_txt_prompt)
         if use_txt_prompt:
             self.gdino = GDINO()
@@ -359,7 +359,7 @@ class Lang2SegTrack:
         self.height, self.width = color_image.shape[:2]
 
         if self.save_video:
-            writer = imageio.get_writer(self.output_path, fps=25)
+            writer = imageio.get_writer(self.output_path, fps=5)
         else:
             writer = None
 
@@ -387,13 +387,13 @@ class Lang2SegTrack:
                 if self.current_text_prompt is not None:
                     # combined_prompt = ".".join(self.persistent_text_prompts)
                     if (state['num_frames']-1) % self.detection_frequency == 0 or self.last_text_prompt is None:
-                        detection = self.gdino.predict(
-                            [Image.fromarray(frame)],
-                            [self.current_text_prompt],
-                            0.4, 0.25
-                        )[0]
+                        # detection = self.gdino.predict(
+                        #     [Image.fromarray(frame)],
+                        #     [self.current_text_prompt],
+                        #     0.4, 0.25
+                        # )[0]
                         # ic(detection)
-                        detection= self.yolo.detect([frame], classes= [13])[0]
+                        detection= self.yolo.detect([frame], classes= [0, 13])[0]
                         # ic(detection)
                         
                         
@@ -423,14 +423,15 @@ class Lang2SegTrack:
                             self.prompts['scores'].extend(valid_scores)
                             self.add_new = True
                         elif self.existing_obj_outputs:
-                            # iou_matrix = batch_mask_iou(valid_masks, np.array(self.existing_masks))
-                            iou_matrix = batch_box_iou(valid_boxes, np.array(self.existing_obj_outputs))
-                            is_new = np.max(iou_matrix, axis=1) < self.iou_threshold
-                            valid_boxes = valid_boxes[is_new]
-                            valid_labels = valid_labels[is_new]
-                            valid_scores = valid_scores[is_new]
-                            # valid_masks = valid_masks[is_new]
+                            # iou_matrix = batch_mask_iou(valid_masks, np.array(self.existing_masks))\
                             if len(valid_boxes) > 0:
+                                iou_matrix = batch_box_iou(valid_boxes, np.array(self.existing_obj_outputs))
+                                is_new = np.max(iou_matrix, axis=1) < self.iou_threshold
+                                valid_boxes = valid_boxes[is_new]
+                                valid_labels = valid_labels[is_new]
+                                valid_scores = valid_scores[is_new]
+                                # valid_masks = valid_masks[is_new]
+                            
                                 self.prompts['prompts'].extend(valid_boxes)
                                 # self.prompts['prompts'].extend(valid_masks)
                                 self.prompts['labels'].extend(valid_labels)
@@ -444,10 +445,8 @@ class Lang2SegTrack:
                     self.add_to_state(predictor, state, self.prompts)
                     current_obj_ids = set(state["obj_ids"])
                     newly_added_ids = current_obj_ids - existing_obj_ids
-
                 predictor.append_frame_to_inference_state(state, frame)
                 self.track_and_visualize(predictor, state, frame, writer)
-
                 if self.add_new:
                     for obj_id in newly_added_ids:
                         self.object_start_frame_idx[obj_id] = state['num_frames'] - 1
