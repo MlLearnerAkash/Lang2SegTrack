@@ -49,7 +49,7 @@ class Lang2SegTrack:
             raise ValueError("In 'img' mode, use_txt_prompt must be True")
 
         self.sam = SAM()
-        self.yolo= YOLODetector(self.yolo_path)
+        self.yolo= YOLODetector(self.yolo_path, conf_thres= 0.75)
         self.sam.build_model(self.sam_type, self.model_path, predictor_type=mode, device=device, use_txt_prompt=use_txt_prompt)
         if use_txt_prompt:
             self.gdino = GDINO()
@@ -158,7 +158,7 @@ class Lang2SegTrack:
                 self.prompts['prompts'] = self.existing_obj_outputs.copy()
 
         frame_dis = self.show_fps(frame)
-        cv2.imshow("Video Tracking", frame_dis)
+        # cv2.imshow("Video Tracking", frame_dis)
 
         if writer:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -171,7 +171,7 @@ class Lang2SegTrack:
         frame[:] = cv2.addWeighted(frame, 1, mask_img, 0.6, 0)
         x, y, w, h = bbox
         cv2.rectangle(frame, (x, y), (x + w, y + h), COLOR[obj_id % len(COLOR)], 2)
-        # cv2.putText(frame, f"obj_{obj_id}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR[obj_id % len(COLOR)], 2)
+        cv2.putText(frame, f"obj_{obj_id}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR[obj_id % len(COLOR)], 2)
 
 
     def show_fps(self, frame):
@@ -239,9 +239,8 @@ class Lang2SegTrack:
             }, ...]
         """
         if self.yolo:
-            ic(">>>>>")
             yolo_results= self.yolo.predict(images_pil)
-            ic(yolo_results)
+            # ic(yolo_results)
         if self.gdino_16:
             if len(images_pil) > 1:
                 raise ValueError("GroundingDINO_16 only support single image")
@@ -282,7 +281,6 @@ class Lang2SegTrack:
                         "mask_scores": score,
                     }
                 )
-            # print(f"Predicted {len(all_results)} masks")
         return all_results
 
     def track_backward(self):
@@ -365,7 +363,7 @@ class Lang2SegTrack:
         else:
             writer = None
 
-        cv2.namedWindow("Video Tracking")
+        # cv2.namedWindow("Video Tracking")
 
         threading.Thread(target=self.input_thread, daemon=True).start()
 
@@ -380,7 +378,7 @@ class Lang2SegTrack:
                         break
                 self.frame_display = frame.copy()
                 # self.history_frames.append(frame)
-                cv2.setMouseCallback("Video Tracking", self.draw_bbox, param=self.frame_display)
+                # cv2.setMouseCallback("Video Tracking", self.draw_bbox, param=self.frame_display)
 
                 if not self.input_queue.empty():
                     self.current_text_prompt = self.input_queue.get()
@@ -395,7 +393,7 @@ class Lang2SegTrack:
                             0.4, 0.25
                         )[0]
                         # ic(detection)
-                        detection= self.yolo.detect([frame])[0]
+                        detection= self.yolo.detect([frame], classes= [13])[0]
                         # ic(detection)
                         
                         
@@ -483,7 +481,7 @@ class Lang2SegTrack:
 if __name__ == "__main__":
     tracker = Lang2SegTrack(sam_type="sam2.1_hiera_tiny",
                             model_path="models/sam2/checkpoints/sam2.1_hiera_tiny.pt",
-                            video_path="/data/dataset/demo_video/gauze-needle.mp4",
+                            video_path="/data/dataset/demo_video/output.mp4",
                             # video_path="assets/05_default_juggle.mp4",
                             output_path="forward_tracked_video.mp4",
                             mode="video",

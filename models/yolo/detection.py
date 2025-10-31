@@ -10,7 +10,7 @@ class YOLODetector:
     """
     YOLO object detector class that loads models and performs inference.
     """
-    def __init__(self, model_path, conf_thres=0.45, iou_thres=0.25, device='cuda:0'):
+    def __init__(self, model_path, conf_thres=0.45, iou_thres=0.25, device='cuda:0', ):
         """
         Initialize the YOLO detector with a model.
 
@@ -27,6 +27,7 @@ class YOLODetector:
         # Load the model
         self.model = self._load_model(model_path)
         self.names = self.model.names if hasattr(self.model, 'names') else {}
+        # self.classes= classes
         
        
         
@@ -42,7 +43,7 @@ class YOLODetector:
     
     
     
-    def detect(self, image, return_raw=False):
+    def detect(self, image, classes: list= [], return_raw=False):
         """
         Run detection on an image.
         
@@ -75,7 +76,7 @@ class YOLODetector:
             start_time = time.time()
             
             # Perform inference
-            results = self.model(source=img, conf=self.conf_thres, iou=self.iou_thres, device=self.device)
+            results = self.model(source=img, conf=self.conf_thres, iou=self.iou_thres, device=self.device, classes= classes)
             
             if return_raw:
                 batch_results.append(results)
