@@ -115,7 +115,7 @@ class YOLODetector:
                 }
             
         batch_results.append(results)
-        ic(batch_results)
+        # ic(batch_results)
         return batch_results if is_batch else batch_results[0]
     
     

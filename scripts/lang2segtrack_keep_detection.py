@@ -124,6 +124,7 @@ class Lang2SegTrack:
             if len(item) == 4:
                 x1, y1, x2, y2 = item
                 cv2.rectangle(self.frame_display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                
                 predictor.add_new_points_or_box(state, box=item, frame_idx=frame_idx, obj_id=id)
             elif len(item) == 2:
                 x, y = item
@@ -133,6 +134,34 @@ class Lang2SegTrack:
                 predictor.add_new_points_or_box(state, points=pt, labels=lbl, frame_idx=frame_idx, obj_id=id)
             else:
                 predictor.add_new_mask(state, mask=item, frame_idx=frame_idx, obj_id=id)
+    
+    # def add_to_state(self, predictor, state, prompts, start_with_0=False):
+    #     frame_idx = 0 if start_with_0 else state["num_frames"]-1
+    #     for id, item in enumerate(prompts['prompts']):
+    #         if len(item) == 4:
+    #             x1, y1, x2, y2 = item
+    #             cv2.rectangle(self.frame_display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+    #             predictor.add_new_points_or_box(state, box=item, frame_idx=frame_idx, obj_id=id)
+                
+    #             # Add negative points around the bounding box to prevent extension
+    #             center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
+    #             neg_points = []
+    #             neg_labels = []
+                
+    #             # Add negative points outside the box
+    #             for dx, dy in [(-10, 0), (10, 0), (0, -10), (0, 10)]:
+    #                 neg_x, neg_y = center_x + dx, center_y + dy
+    #                 if 0 <= neg_x < self.width and 0 <= neg_y < self.height:
+    #                     neg_points.append([neg_x, neg_y])
+    #                     neg_labels.append(0)  # 0 for negative
+                
+    #             if neg_points:
+    #                 neg_pts = torch.tensor(neg_points, dtype=torch.float32)
+    #                 neg_lbls = torch.tensor(neg_labels, dtype=torch.int32)
+    #                 predictor.add_new_points_or_box(state, points=neg_pts, labels=neg_lbls, 
+    #                                             frame_idx=frame_idx, obj_id=id)
+    #             for (nx, ny) in neg_points:
+    #                 cv2.circle(self.frame_display, (int(nx), int(ny)), 3, (0, 0, 255), -1)
 
     def track_and_visualize(self, predictor, state, frame, writer):
         if (any(len(state["point_inputs_per_obj"][i]) > 0 for i in range(len(state["point_inputs_per_obj"]))) or
@@ -159,6 +188,12 @@ class Lang2SegTrack:
 
         frame_dis = self.show_fps(frame)
         # cv2.imshow("Video Tracking", frame_dis)
+        # Add frame index at top-right corner
+        frame_text = f"Frame: {state['num_frames']}"
+        text_size = cv2.getTextSize(frame_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+        text_x = self.width - text_size[0] - 10  # 10 pixels from right edge
+        text_y = 30  # 30 pixels from top
+        cv2.putText(frame, frame_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
 
         if writer:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
