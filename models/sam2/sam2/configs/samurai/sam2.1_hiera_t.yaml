@@ -85,12 +85,14 @@ model:
         num_layers: 2
 
   num_maskmem: 7
-  image_size: 1024
+  memory_temporal_stride_for_eval: 3
+  image_size: 2048
   # apply scaled sigmoid on mask logits for memory encoder, and directly feed input mask as output mask
   # SAM decoder
-  sigmoid_scale_for_mem_enc: 20.0
-  sigmoid_bias_for_mem_enc: -10.0
-  use_mask_input_as_output_without_sam: true
+  sigmoid_scale_for_mem_enc: 12.0
+  sigmoid_bias_for_mem_enc: -15.0
+  use_mask_input_as_output_without_sam: false
+  
   # Memory
   directly_add_no_mem_embed: true
   no_obj_embed_spatial: true
@@ -100,6 +102,12 @@ model:
   multimask_output_in_sam: true
   # SAM heads
   iou_prediction_use_sigmoid: True
+  # 3. Add these NEW parameters to prevent similarity-based expansion:
+  non_overlap_masks_for_mem_enc: true  # NEW - prevents masks from overlapping
+  binarize_mask_from_pts_for_mem_enc: true  # Keep false for smooth tracking
+
+
+
   # cross-attend to object pointers from other frames (based on SAM output tokens) in the encoder
   use_obj_ptrs_in_encoder: true
   add_tpos_enc_to_obj_ptrs: true
@@ -111,9 +119,9 @@ model:
   pred_obj_scores_mlp: true
   fixed_no_obj_ptr: true
   # multimask tracking settings
-  multimask_output_for_tracking: true
+  multimask_output_for_tracking: false
   use_multimask_token_for_obj_ptr: true
-  multimask_min_pt_num: 0
+  multimask_min_pt_num: 1
   multimask_max_pt_num: 1
   use_mlp_for_obj_ptr_proj: true
   # Compilation flag

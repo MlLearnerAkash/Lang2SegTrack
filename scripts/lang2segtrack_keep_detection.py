@@ -31,7 +31,8 @@ class Lang2SegTrack:
     def __init__(self, sam_type:str="sam2.1_hiera_tiny", model_path:str="models/sam2/checkpoints/sam2.1_hiera_large.pt",
                  video_path:str="", output_path:str="", use_txt_prompt:bool=False, max_frames:int=60,
                  first_prompts: list | None = None, save_video=True, device="cuda:0", mode="realtime",
-                 yolo_path= "/data/dataset/weights/base_weight/weights/best_wo_specialised_training.pt"):
+                 yolo_path= "/data/dataset/weights/base_weight/weights/best_wo_specialised_training.pt",
+                 conservativeness="high"):
         self.sam_type = sam_type # the type of SAM model to use
         self.model_path = model_path # the path to the SAM model checkpoint
         self.video_path = video_path # the path to the video to track. If mode="video", this param is required.
@@ -51,6 +52,9 @@ class Lang2SegTrack:
         self.sam = SAM()
         self.yolo= YOLODetector(self.yolo_path, conf_thres= 0.45)
         self.sam.build_model(self.sam_type, self.model_path, predictor_type=mode, device=device, use_txt_prompt=use_txt_prompt)
+        # self.sam.build_model(self.sam_type, self.model_path, predictor_type=mode, 
+        #             device=device, use_txt_prompt=use_txt_prompt,
+        #             conservativeness=conservativeness)
         if use_txt_prompt:
             self.gdino = GDINO()
             
@@ -78,7 +82,7 @@ class Lang2SegTrack:
         else:
             self.prompts = {'prompts': [], 'labels': [], 'scores': []}
         self.iou_threshold = 0.3
-        self.detection_frequency = 5
+        self.detection_frequency = 10
 
         self.input_queue = queue.Queue()
         self.drawing = False
@@ -118,22 +122,93 @@ class Lang2SegTrack:
                 cv2.rectangle(param, (self.ix, self.iy), (x, y), (0, 255, 0), 2)
             self.drawing = False
 
+    def convert_boxes_to_masks(self, frame, boxes):
+        """
+        Convert YOLO bounding boxes to SAM2 segmentation masks.
+        
+        Args:
+            frame: Current video frame (numpy array)
+            boxes: List of bounding boxes in [x1, y1, x2, y2] format
+            
+        Returns:
+            masks: List of boolean masks
+            scores: List of confidence scores for each mask
+        """
+        if len(boxes) == 0:
+            return [], []
+        
+        # Lazy initialization of img_predictor
+        if not hasattr(self.sam, 'img_predictor'):
+            print("Initializing SAM2 image predictor for mask conversion...")
+            from sam2.sam2_image_predictor import SAM2ImagePredictor
+            self.sam.img_predictor = SAM2ImagePredictor(self.sam.model)
+        
+        # Set the image for SAM2
+        self.sam.img_predictor.set_image(frame)
+        
+        masks = []
+        scores = []
+        
+        # Convert each bounding box to a mask
+        for box in boxes:
+            x1, y1, x2, y2 = box
+            # SAM2 expects box in xyxy format
+            box_xyxy = np.array([x1, y1, x2, y2])
+            
+            # Get mask from SAM2
+            mask, score, _ = self.sam.img_predictor.predict(
+                box=box_xyxy,
+                multimask_output=False
+            )
+            
+            # mask shape is (1, H, W), we need (H, W)
+            mask = mask[0].astype(bool)
+            
+            # Constrain the mask to stay within the bounding box region
+            constrained_mask = np.zeros_like(mask, dtype=bool)
+            constrained_mask[y1:y2, x1:x2] = mask[y1:y2, x1:x2]
+            
+            masks.append(constrained_mask)
+            scores.append(float(score[0]))
+        
+        return masks, scores
+
+
+    def get_mask_from_bbox(self, bbox):
+        """
+        Helper function to create a simple mask from a bounding box.
+        Used for existing tracked objects.
+        
+        Args:
+            bbox: [x1, y1, x2, y2] format
+            
+        Returns:
+            mask: Boolean mask
+        """
+        x1, y1, x2, y2 = bbox
+        mask = np.zeros((self.height, self.width), dtype=bool)
+        mask[y1:y2, x1:x2] = True
+        return mask
+    
     def add_to_state(self, predictor, state, prompts, start_with_0=False):
         frame_idx = 0 if start_with_0 else state["num_frames"]-1
         for id, item in enumerate(prompts['prompts']):
-            if len(item) == 4:
+            # Check if item is a mask (numpy array with bool dtype)
+            if isinstance(item, np.ndarray) and item.dtype == bool:
+                # It's a mask prompt
+                predictor.add_new_mask(state, mask=item, frame_idx=frame_idx, obj_id=id)
+            elif len(item) == 4:
+                # It's a bounding box [x1, y1, x2, y2]
                 x1, y1, x2, y2 = item
                 cv2.rectangle(self.frame_display, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                
                 predictor.add_new_points_or_box(state, box=item, frame_idx=frame_idx, obj_id=id)
             elif len(item) == 2:
+                # It's a point [x, y]
                 x, y = item
                 cv2.circle(self.frame_display, (x, y), 5, (0, 255, 0), -1)
                 pt = torch.tensor([[x, y]], dtype=torch.float32)
                 lbl = torch.tensor([1], dtype=torch.int32)
                 predictor.add_new_points_or_box(state, points=pt, labels=lbl, frame_idx=frame_idx, obj_id=id)
-            else:
-                predictor.add_new_mask(state, mask=item, frame_idx=frame_idx, obj_id=id)
     
     # def add_to_state(self, predictor, state, prompts, start_with_0=False):
     #     frame_idx = 0 if start_with_0 else state["num_frames"]-1
@@ -460,15 +535,24 @@ class Lang2SegTrack:
                         elif self.existing_obj_outputs:
                             # iou_matrix = batch_mask_iou(valid_masks, np.array(self.existing_masks))\
                             if len(valid_boxes) > 0:
-                                iou_matrix = batch_box_iou(valid_boxes, np.array(self.existing_obj_outputs))
+                                # Convert YOLO boxes to SAM2 masks
+                                print(f"Converting {len(valid_boxes)} YOLO boxes to SAM2 masks...")
+                                valid_masks, mask_scores = self.convert_boxes_to_masks(frame, valid_boxes)
+                                print(f"Generated {len(valid_masks)} segmentation masks")
+                                
+                                # Calculate IOU with existing masks (not boxes)
+                                existing_masks = [self.get_mask_from_bbox(bbox) for bbox in self.existing_obj_outputs]
+                                iou_matrix = batch_mask_iou(np.array(valid_masks), np.array(existing_masks))
+                                
                                 is_new = np.max(iou_matrix, axis=1) < self.iou_threshold
-                                valid_boxes = valid_boxes[is_new]
+                                
+                                # Filter to keep only new detections
+                                valid_masks_filtered = [m for i, m in enumerate(valid_masks) if is_new[i]]
                                 valid_labels = valid_labels[is_new]
                                 valid_scores = valid_scores[is_new]
-                                # valid_masks = valid_masks[is_new]
-                            
-                                self.prompts['prompts'].extend(valid_boxes)
-                                # self.prompts['prompts'].extend(valid_masks)
+                                
+                                # Use masks as prompts instead of boxes
+                                self.prompts['prompts'].extend(valid_masks_filtered)
                                 self.prompts['labels'].extend(valid_labels)
                                 self.prompts['scores'].extend(valid_scores)
                                 self.add_new = True
@@ -513,8 +597,8 @@ class Lang2SegTrack:
 
 
 if __name__ == "__main__":
-    tracker = Lang2SegTrack(sam_type="sam2.1_hiera_tiny",
-                            model_path="models/sam2/checkpoints/sam2.1_hiera_tiny.pt",
+    tracker = Lang2SegTrack(sam_type="sam2.1_hiera_large",
+                            model_path="models/sam2/checkpoints/sam2.1_hiera_large.pt",
                             video_path="/data/dataset/demo_video/output.mp4",
                             # video_path="assets/05_default_juggle.mp4",
                             output_path="forward_tracked_video.mp4",

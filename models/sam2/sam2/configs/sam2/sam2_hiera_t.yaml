@@ -85,12 +85,16 @@ model:
         num_layers: 2
 
   num_maskmem: 7
-  image_size: 1024
+  image_size: 2048
   # apply scaled sigmoid on mask logits for memory encoder, and directly feed input mask as output mask
   # SAM decoder
-  sigmoid_scale_for_mem_enc: 20.0
-  sigmoid_bias_for_mem_enc: -10.0
+  sigmoid_scale_for_mem_enc: 12.0
+  sigmoid_bias_for_mem_enc: -15.0
   use_mask_input_as_output_without_sam: true
+  # 3. Add these NEW parameters to prevent similarity-based expansion:
+  non_overlap_masks_for_mem_enc: true  # NEW - prevents masks from overlapping
+  binarize_mask_from_pts_for_mem_enc: false  # Keep false for smooth tracking
+
   # Memory
   directly_add_no_mem_embed: true
   # use high-resolution feature map in the SAM mask decoder
@@ -108,7 +112,7 @@ model:
   pred_obj_scores_mlp: true
   fixed_no_obj_ptr: true
   # multimask tracking settings
-  multimask_output_for_tracking: true
+  multimask_output_for_tracking: false
   use_multimask_token_for_obj_ptr: true
   multimask_min_pt_num: 0
   multimask_max_pt_num: 1
