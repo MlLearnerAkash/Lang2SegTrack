@@ -495,21 +495,12 @@ class Lang2SegTrack:
                     # self.persistent_text_prompts.add(text)
 
                 if self.current_text_prompt is not None:
-                    # combined_prompt = ".".join(self.persistent_text_prompts)
                     if (state['num_frames']-1) % self.detection_frequency == 0 or self.last_text_prompt is None:
-                        # detection = self.gdino.predict(
-                        #     [Image.fromarray(frame)],
-                        #     [self.current_text_prompt],
-                        #     0.4, 0.25
-                        # )[0]
-                        # ic(detection)
                         detection= self.yolo.detect([frame], classes= [0, 13])[0]
-                        # ic(detection)
                         
-                        
-                        scores = detection['scores'].cpu().numpy() #if hasattr(detection['scores'], 'cpu') else detection['scores']
-                        labels = detection['labels']#.cpu().numpy() #if hasattr(detection['labels'], 'cpu') else detection['labels']
-                        boxes = detection['boxes'].cpu().numpy().tolist() #if hasattr(detection['boxes'], 'cpu') else detection['boxes']
+                        scores = detection['scores'].cpu().numpy()
+                        labels = detection['labels']
+                        boxes = detection['boxes'].cpu().numpy().tolist()
 
                         boxes_np = np.array(boxes, dtype=np.int32)
                         labels_np = np.array(labels)
@@ -519,43 +510,73 @@ class Lang2SegTrack:
                         valid_labels = labels_np[filter_mask]
                         valid_scores = scores_np[filter_mask]
 
-
-                        # filter_mask = detection['scores'] > 0.3
-                        # # valid_boxes = np.array(detection['boxes'], dtype=np.int32)[filter_mask]
-                        # valid_labels = np.array(detection['labels'])[filter_mask]
-                        # valid_scores = detection['scores'][filter_mask]
-                        # valid_masks = detection['masks'][filter_mask]
-
                         if self.last_text_prompt != self.current_text_prompt:
+                            # New prompt - add all valid detections
                             self.prompts['prompts'].extend(valid_boxes)
-                            # self.prompts['prompts'].extend(valid_masks)
                             self.prompts['labels'].extend(valid_labels)
                             self.prompts['scores'].extend(valid_scores)
                             self.add_new = True
                         elif self.existing_obj_outputs:
-                            # iou_matrix = batch_mask_iou(valid_masks, np.array(self.existing_masks))\
+                            # Check both spatial overlap (IOU) AND class labels
                             if len(valid_boxes) > 0:
-                                # Convert YOLO boxes to SAM2 masks
-                                print(f"Converting {len(valid_boxes)} YOLO boxes to SAM2 masks...")
-                                valid_masks, mask_scores = self.convert_boxes_to_masks(frame, valid_boxes)
-                                print(f"Generated {len(valid_masks)} segmentation masks")
+                                print(f"Checking {len(valid_boxes)} YOLO detections against existing objects...")
                                 
-                                # Calculate IOU with existing masks (not boxes)
+                                # Convert YOLO boxes to SAM2 masks
+                                valid_masks, mask_scores = self.convert_boxes_to_masks(frame, valid_boxes)
+                                
+                                # Get existing masks from tracked objects
                                 existing_masks = [self.get_mask_from_bbox(bbox) for bbox in self.existing_obj_outputs]
+                                
+                                # Calculate spatial IOU
                                 iou_matrix = batch_mask_iou(np.array(valid_masks), np.array(existing_masks))
                                 
-                                is_new = np.max(iou_matrix, axis=1) < self.iou_threshold
+                                # Check class labels - build existing labels list from prompts
+                                existing_labels = []
+                                for i, prompt in enumerate(self.prompts['prompts']):
+                                    if i < len(self.prompts['labels']) and self.prompts['labels'][i] is not None:
+                                        existing_labels.append(self.prompts['labels'][i])
+                                    else:
+                                        existing_labels.append(-1)  # Unknown class for manually added objects
+                
+                                # Filter out detections that have:
+                                # 1. High IOU with existing object AND
+                                # 2. Same class label as that existing object
+                                new_detections = []
+                                for i in range(len(valid_masks)):
+                                    is_new = True
+                                    max_iou_idx = np.argmax(iou_matrix[i])
+                                    max_iou = iou_matrix[i, max_iou_idx]
+                                    
+                                    # If high spatial overlap with an existing object
+                                    if max_iou >= self.iou_threshold:
+                                        # Check if it's the same class
+                                        if max_iou_idx < len(existing_labels):
+                                            existing_class = existing_labels[max_iou_idx]
+                                            detected_class = valid_labels[i]
+                                            
+                                            # If same class and same location, skip it
+                                            if existing_class == detected_class:
+                                                is_new = False
+                                                print(f"  Skipping detection: class {detected_class} already tracked at this location (IOU: {max_iou:.2f})")
+                                    
+                                    if is_new:
+                                        new_detections.append(i)
                                 
-                                # Filter to keep only new detections
-                                valid_masks_filtered = [m for i, m in enumerate(valid_masks) if is_new[i]]
-                                valid_labels = valid_labels[is_new]
-                                valid_scores = valid_scores[is_new]
-                                
-                                # Use masks as prompts instead of boxes
-                                self.prompts['prompts'].extend(valid_masks_filtered)
-                                self.prompts['labels'].extend(valid_labels)
-                                self.prompts['scores'].extend(valid_scores)
-                                self.add_new = True
+                                # Add only new detections
+                                if new_detections:
+                                    valid_masks_filtered = [valid_masks[i] for i in new_detections]
+                                    valid_labels_filtered = valid_labels[new_detections]
+                                    valid_scores_filtered = valid_scores[new_detections]
+                                    
+                                    print(f"  Adding {len(new_detections)} new detections (filtered {len(valid_masks) - len(new_detections)} duplicates)")
+                                    
+                                    self.prompts['prompts'].extend(valid_masks_filtered)
+                                    self.prompts['labels'].extend(valid_labels_filtered)
+                                    self.prompts['scores'].extend(valid_scores_filtered)
+                                    self.add_new = True
+                                else:
+                                    print(f"  No new detections to add - all {len(valid_boxes)} detections are duplicates")
+    
                     self.last_text_prompt = self.current_text_prompt
 
                 if self.add_new:
