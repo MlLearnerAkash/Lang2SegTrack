@@ -244,9 +244,12 @@ class Lang2SegTrack:
             for frame_idx, obj_ids, masks in predictor.propagate_in_frame(state, state["num_frames"] - 1):
                 self.existing_obj_outputs = []
                 # self.prompts['prompts'] = []
+                self.current_frame_masks = []
                 for obj_id, mask in zip(obj_ids, masks):
                     mask = mask[0].cpu().numpy() > 0.0
                     mask = filter_mask_outliers(mask)
+                    # Store the actual mask for IOU comparison
+                    self.current_frame_masks.append(mask)
                     nonzero = np.argwhere(mask)
                     if nonzero.size == 0:
                         bbox = [0, 0, 0, 0]
@@ -523,9 +526,17 @@ class Lang2SegTrack:
                                 
                                 # Convert YOLO boxes to SAM2 masks
                                 valid_masks, mask_scores = self.convert_boxes_to_masks(frame, valid_boxes)
-                                
+                                #NOTE: turned off to load xurrent mask
                                 # Get existing masks from tracked objects
-                                existing_masks = [self.get_mask_from_bbox(bbox) for bbox in self.existing_obj_outputs]
+                                # existing_masks = [self.get_mask_from_bbox(bbox) for bbox in self.existing_obj_outputs]
+                                
+                                # Use CURRENT frame's tracked masks instead of bbox-based masks
+                                if hasattr(self, 'current_frame_masks') and len(self.current_frame_masks) > 0:
+                                    existing_masks = self.current_frame_masks
+                                else:
+                                    # Fallback to bbox-based masks
+                                    existing_masks = [self.get_mask_from_bbox(bbox) for bbox in self.existing_obj_outputs]
+
                                 
                                 # Calculate spatial IOU
                                 iou_matrix = batch_mask_iou(np.array(valid_masks), np.array(existing_masks))
