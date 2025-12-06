@@ -7,6 +7,7 @@ import threading
 import queue
 import time
 from io import BytesIO
+from collections import defaultdict
 
 import cv2
 import torch
@@ -82,7 +83,14 @@ class Lang2SegTrack:
         else:
             self.prompts = {'prompts': [], 'labels': [], 'scores': []}
         self.iou_threshold = 0.3
-        self.detection_frequency = 10
+        self.detection_frequency =5
+        self.object_labels = {}  # Maps obj_id to class name
+        
+        # Counting-related attributes
+        self.incision_area = None  # Will store the incision polygon/bbox
+        self.object_track_history = {}  # Store centroid positions for each object
+        self.counted_ids = []  # List of object IDs that have been counted
+        self.classwise_count = defaultdict(lambda: {"IN": 0, "OUT": 0})  # Per-class counts
 
         self.input_queue = queue.Queue()
         self.drawing = False
@@ -121,6 +129,162 @@ class Lang2SegTrack:
                 self.add_new = True
                 cv2.rectangle(param, (self.ix, self.iy), (x, y), (0, 255, 0), 2)
             self.drawing = False
+
+    def set_incision_area(self, polygon_points):
+        """
+        Set the incision area for counting.
+        
+        Args:
+            polygon_points: List of (x, y) tuples defining the incision area polygon
+                           or [x1, y1, x2, y2] for rectangular area
+        """
+        if len(polygon_points) == 4 and not isinstance(polygon_points[0], (list, tuple)):
+            # Convert bbox to polygon
+            x1, y1, x2, y2 = polygon_points
+            self.incision_area = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.int32)
+        else:
+            self.incision_area = np.array(polygon_points, dtype=np.int32)
+        print(f"Incision area set: {self.incision_area}")
+    
+    def is_inside_incision(self, bbox):
+        """
+        Check if object's center point is inside the incision area.
+        
+        Args:
+            bbox: [x, y, w, h] format
+            
+        Returns:
+            bool: True if center is inside incision area
+        """
+        if self.incision_area is None:
+            return False
+        
+        x, y, w, h = bbox
+        center_x = x + w // 2
+        center_y = y + h // 2
+        
+        # Use cv2.pointPolygonTest for polygon containment
+        result = cv2.pointPolygonTest(self.incision_area, (center_x, center_y), False)
+        return result >= 0
+    
+    def update_counting(self, obj_id, bbox, category_name):
+        """
+        Update counting statistics based on object trajectory crossing the incision boundary.
+        Uses tracking history to determine if object crossed from outside->inside or inside->outside.
+        
+        Args:
+            obj_id: Object ID
+            bbox: Bounding box [x, y, w, h]
+            category_name: Category name of the object
+        """
+        if self.incision_area is None:
+            return
+        
+        # Calculate current centroid
+        x, y, w, h = bbox
+        current_centroid = (int(x + w // 2), int(y + h // 2))
+        
+        # Initialize tracking history for this object
+        if obj_id not in self.object_track_history:
+            self.object_track_history[obj_id] = []
+        
+        # Store current centroid
+        self.object_track_history[obj_id].append(current_centroid)
+        
+        # Keep only last 30 positions to save memory
+        if len(self.object_track_history[obj_id]) > 30:
+            self.object_track_history[obj_id].pop(0)
+        
+        # Need at least 2 positions to determine crossing
+        if len(self.object_track_history[obj_id]) < 2:
+            return
+        
+        # Skip if already counted
+        if obj_id in self.counted_ids:
+            return
+        
+        prev_centroid = self.object_track_history[obj_id][-2]
+        
+        # Check if the trajectory crosses the incision boundary
+        is_inside_now = self.is_centroid_inside_incision(current_centroid)
+        was_inside = self.is_centroid_inside_incision(prev_centroid)
+        
+        # Detect boundary crossing
+        if is_inside_now and not was_inside:
+            # Crossed from outside to inside
+            self.classwise_count[category_name]["IN"] += 1
+            self.counted_ids.append(obj_id)
+            print(f"  {category_name} obj_{obj_id} ENTERED incision (IN count: {self.classwise_count[category_name]['IN']})")
+            
+        elif not is_inside_now and was_inside:
+            # Crossed from inside to outside
+            self.classwise_count[category_name]["OUT"] += 1
+            self.counted_ids.append(obj_id)
+            print(f"  {category_name} obj_{obj_id} EXITED incision (OUT count: {self.classwise_count[category_name]['OUT']})")
+
+    def is_centroid_inside_incision(self, centroid):
+        """
+        Check if a centroid point is inside the incision area.
+        
+        Args:
+            centroid: (x, y) tuple
+            
+        Returns:
+            bool: True if centroid is inside incision area
+        """
+        if self.incision_area is None:
+            return False
+        
+        result = cv2.pointPolygonTest(self.incision_area, centroid, False)
+        return result >= 0
+    
+    def draw_incision_area(self, frame):
+        """Draw the incision area on the frame."""
+        if self.incision_area is not None:
+            cv2.polylines(frame, [self.incision_area], True, (0, 255, 255), 3)
+            cv2.putText(frame, "INCISION AREA", 
+                       tuple(self.incision_area[0]), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
+    def draw_counting_stats(self, frame):
+        """Draw counting statistics on the frame."""
+        if self.incision_area is None:
+            return
+        
+        y_offset = 70
+        for category_name in sorted(self.classwise_count.keys()):
+            in_count = self.classwise_count[category_name]["IN"]
+            out_count = self.classwise_count[category_name]["OUT"]
+            
+            stats_text = f"{category_name}: IN={in_count} OUT={out_count}"
+            cv2.putText(frame, stats_text, (10, y_offset), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2, cv2.LINE_AA)
+            y_offset += 30
+    
+    def print_final_statistics(self):
+        """Print final counting statistics."""
+        print("\n" + "="*60)
+        print("FINAL COUNTING STATISTICS")
+        print("="*60)
+        
+        total_in = 0
+        total_out = 0
+        
+        for category_name in sorted(self.classwise_count.keys()):
+            in_count = self.classwise_count[category_name]["IN"]
+            out_count = self.classwise_count[category_name]["OUT"]
+            total_in += in_count
+            total_out += out_count
+            
+            print(f"\n{category_name.upper()}:")
+            print(f"  Objects entered (IN): {in_count}")
+            print(f"  Objects exited (OUT): {out_count}")
+        
+        print(f"\nTOTAL:")
+        print(f"  Total IN: {total_in}")
+        print(f"  Total OUT: {total_out}")
+        print(f"  Total unique objects counted: {len(self.counted_ids)}")
+        print("="*60 + "\n")
 
     def convert_boxes_to_masks(self, frame, boxes):
         """
@@ -257,6 +421,13 @@ class Lang2SegTrack:
                         y_min, x_min = nonzero.min(axis=0)
                         y_max, x_max = nonzero.max(axis=0)
                         bbox = [x_min, y_min, x_max - x_min, y_max - y_min]
+                    
+                    # Get category name for counting
+                    category_name = self.object_labels.get(obj_id, "unknown")
+                    
+                    # Update counting statistics
+                    self.update_counting(obj_id, bbox, category_name)
+                    
                     self.draw_mask_and_bbox(frame, mask, bbox, obj_id)
                     # self.existing_masks.append(mask)
                     self.existing_obj_outputs.append([bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]])
@@ -264,6 +435,10 @@ class Lang2SegTrack:
                     # self.all_forward_masks.setdefault(obj_id, []).append(mask)
                 self.prompts['prompts'] = self.existing_obj_outputs.copy()
 
+        # Draw incision area and statistics
+        self.draw_incision_area(frame)
+        self.draw_counting_stats(frame)
+        
         frame_dis = self.show_fps(frame)
         # cv2.imshow("Video Tracking", frame_dis)
         # Add frame index at top-right corner
@@ -284,7 +459,17 @@ class Lang2SegTrack:
         frame[:] = cv2.addWeighted(frame, 1, mask_img, 0.6, 0)
         x, y, w, h = bbox
         cv2.rectangle(frame, (x, y), (x + w, y + h), COLOR[obj_id % len(COLOR)], 2)
-        cv2.putText(frame, f"obj_{obj_id}", (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR[obj_id % len(COLOR)], 2)
+        
+        # Get category name for this object
+        label_text = f"obj_{obj_id}"
+        if obj_id in self.object_labels:
+            label_text = f"obj_{obj_id}_{self.object_labels[obj_id]}"
+        
+        # Add indicator if object was counted
+        if obj_id in self.counted_ids:
+            label_text += " [COUNTED]"
+        
+        cv2.putText(frame, label_text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR[obj_id % len(COLOR)], 2)
 
 
     def show_fps(self, frame):
@@ -599,9 +784,21 @@ class Lang2SegTrack:
                 predictor.append_frame_to_inference_state(state, frame)
                 self.track_and_visualize(predictor, state, frame, writer)
                 if self.add_new:
-                    for obj_id in newly_added_ids:
+                    for idx, obj_id in enumerate(newly_added_ids):
                         self.object_start_frame_idx[obj_id] = state['num_frames'] - 1
-                        # self.object_start_prompts[obj_id] = self.all_forward_masks[obj_id][0]
+                        
+                        # Associate the object with its category name
+                        # Find the corresponding label from prompts
+                        prompt_idx = len(self.prompts['prompts']) - len(newly_added_ids) + idx
+                        if prompt_idx < len(self.prompts['labels']) and self.prompts['labels'][prompt_idx] is not None:
+                            class_id = self.prompts['labels'][prompt_idx]
+                            # Get class name from YOLO detector
+                            class_name = self.yolo.model.names.get(class_id, f"class_{class_id}")
+                            self.object_labels[obj_id] = class_name
+                            print(f"  Object {obj_id} assigned class: {class_name}")
+                        else:
+                            self.object_labels[obj_id] = "unknown"
+                    
                     self.add_new = False
 
                 if state["num_frames"] % self.max_frames == 0:
@@ -617,6 +814,10 @@ class Lang2SegTrack:
             pipeline.stop()
         else:
             cap.release()
+        
+        # Print final statistics
+        self.print_final_statistics()
+        
         # self.track_backward()
         # self.visualize_final_masks()
         if writer:
@@ -637,5 +838,11 @@ if __name__ == "__main__":
                             mode="video",
                             save_video=True,
                             use_txt_prompt=True)
+    
+    # Define incision area (example: center rectangle)
+    # Adjust coordinates based on your video dimensions
+    # Format: [x1, y1, x2, y2] or [(x1,y1), (x2,y2), (x3,y3), (x4,y4)] for polygon
+    tracker.set_incision_area([750, 1040+250, 1490-250, 1740])
+    
     tracker.current_text_prompt = 'car'
     tracker.track()
