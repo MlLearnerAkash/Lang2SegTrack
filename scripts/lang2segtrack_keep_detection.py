@@ -85,11 +85,11 @@ class Lang2SegTrack:
         self.iou_threshold = 0.3
         self.detection_frequency =5
         self.object_labels = {}  # Maps obj_id to class name
-        
+        self.last_known_bboxes = {}
+
         # Counting-related attributes
         self.incision_area = None  # Will store the incision polygon/bbox
         self.object_track_history = {}  # Store centroid positions for each object
-        self.counted_ids = []  # List of object IDs that have been counted
         self.classwise_count = defaultdict(lambda: {"IN": 0, "OUT": 0})  # Per-class counts
 
         self.input_queue = queue.Queue()
@@ -164,13 +164,13 @@ class Lang2SegTrack:
         center_y = y + h // 2
         
         # Use cv2.pointPolygonTest for polygon containment
-        result = cv2.pointPolygonTest(self.incision_area, (center_x, center_y), False)
+        result = cv2.pointPolygonTest(self.incision_area, (int(center_x), int(center_y)), False)
         return result >= 0
     
     def update_counting(self, obj_id, bbox, category_name):
         """
         Update counting statistics based on object trajectory crossing the incision boundary.
-        Uses tracking history to determine if object crossed from outside->inside or inside->outside.
+        Tracks multiple crossings per object.
         
         Args:
             obj_id: Object ID
@@ -199,28 +199,31 @@ class Lang2SegTrack:
         if len(self.object_track_history[obj_id]) < 2:
             return
         
-        # Skip if already counted
-        if obj_id in self.counted_ids:
-            return
-        
         prev_centroid = self.object_track_history[obj_id][-2]
         
+        #NOTE: to be thought of
+        # if obj_id in self.counted_ids:
+        #     return
+
         # Check if the trajectory crosses the incision boundary
         is_inside_now = self.is_centroid_inside_incision(current_centroid)
         was_inside = self.is_centroid_inside_incision(prev_centroid)
         
-        # Detect boundary crossing
+        # Detect boundary crossing - allow multiple crossings per object
         if is_inside_now and not was_inside:
             # Crossed from outside to inside
             self.classwise_count[category_name]["IN"] += 1
-            self.counted_ids.append(obj_id)
             print(f"  {category_name} obj_{obj_id} ENTERED incision (IN count: {self.classwise_count[category_name]['IN']})")
             
         elif not is_inside_now and was_inside:
             # Crossed from inside to outside
             self.classwise_count[category_name]["OUT"] += 1
-            self.counted_ids.append(obj_id)
             print(f"  {category_name} obj_{obj_id} EXITED incision (OUT count: {self.classwise_count[category_name]['OUT']})")
+
+        if obj_id ==1:
+            print(">>>>", is_inside_now)
+            print(">>>centroid location>>>", current_centroid)
+
 
     def is_centroid_inside_incision(self, centroid):
         """
@@ -279,11 +282,13 @@ class Lang2SegTrack:
             print(f"\n{category_name.upper()}:")
             print(f"  Objects entered (IN): {in_count}")
             print(f"  Objects exited (OUT): {out_count}")
+            print(f"  Net count (IN - OUT): {in_count - out_count}")
         
         print(f"\nTOTAL:")
         print(f"  Total IN: {total_in}")
         print(f"  Total OUT: {total_out}")
-        print(f"  Total unique objects counted: {len(self.counted_ids)}")
+        print(f"  Net objects inside: {total_in - total_out}")
+        print(f"  Total unique objects tracked: {len(self.object_track_history)}")
         print("="*60 + "\n")
 
     def convert_boxes_to_masks(self, frame, boxes):
@@ -416,11 +421,14 @@ class Lang2SegTrack:
                     self.current_frame_masks.append(mask)
                     nonzero = np.argwhere(mask)
                     if nonzero.size == 0:
+                        continue
                         bbox = [0, 0, 0, 0]
+                        # bbox = self.last_known_bboxes.get(obj_id, [0, 0, 0, 0])
                     else:
                         y_min, x_min = nonzero.min(axis=0)
                         y_max, x_max = nonzero.max(axis=0)
                         bbox = [x_min, y_min, x_max - x_min, y_max - y_min]
+                        self.last_known_bboxes[obj_id] = bbox
                     
                     # Get category name for counting
                     category_name = self.object_labels.get(obj_id, "unknown")
@@ -443,6 +451,9 @@ class Lang2SegTrack:
         # cv2.imshow("Video Tracking", frame_dis)
         # Add frame index at top-right corner
         frame_text = f"Frame: {state['num_frames']}"
+        print("=="*20)
+        print("STATS FOR FRAME: #",state['num_frames'])
+        print("=="*20)
         text_size = cv2.getTextSize(frame_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
         text_x = self.width - text_size[0] - 10  # 10 pixels from right edge
         text_y = 30  # 30 pixels from top
@@ -465,9 +476,9 @@ class Lang2SegTrack:
         if obj_id in self.object_labels:
             label_text = f"obj_{obj_id}_{self.object_labels[obj_id]}"
         
-        # Add indicator if object was counted
-        if obj_id in self.counted_ids:
-            label_text += " [COUNTED]"
+        # Add indicator if object is currently inside incision
+        if self.is_inside_incision(bbox):
+            label_text += " [IN]"
         
         cv2.putText(frame, label_text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, COLOR[obj_id % len(COLOR)], 2)
 
@@ -842,7 +853,7 @@ if __name__ == "__main__":
     # Define incision area (example: center rectangle)
     # Adjust coordinates based on your video dimensions
     # Format: [x1, y1, x2, y2] or [(x1,y1), (x2,y2), (x3,y3), (x4,y4)] for polygon
-    tracker.set_incision_area([750, 1040+250, 1490-250, 1740])
+    tracker.set_incision_area([700, 1040+200, 1490-200, 1790])
     
     tracker.current_text_prompt = 'car'
     tracker.track()
