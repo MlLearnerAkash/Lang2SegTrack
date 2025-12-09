@@ -32,7 +32,7 @@ class Lang2SegTrack:
     def __init__(self, sam_type:str="sam2.1_hiera_tiny", model_path:str="models/sam2/checkpoints/sam2.1_hiera_large.pt",
                  video_path:str="", output_path:str="", use_txt_prompt:bool=False, max_frames:int=60,
                  first_prompts: list | None = None, save_video=True, device="cuda:0", mode="realtime",
-                 yolo_path= "/data/dataset/weights/base_weight/weights/best_wo_specialised_training.pt",
+                 yolo_path= "/data/dataset/weights/opervu_seg_46SIs_211125/opervu_46SIs_21112025_2/weights/best.pt",
                  conservativeness="high"):
         self.sam_type = sam_type # the type of SAM model to use
         self.model_path = model_path # the path to the SAM model checkpoint
@@ -83,7 +83,7 @@ class Lang2SegTrack:
         else:
             self.prompts = {'prompts': [], 'labels': [], 'scores': []}
         self.iou_threshold = 0.3
-        self.detection_frequency =5
+        self.detection_frequency =10
         self.object_labels = {}  # Maps obj_id to class name
         self.last_known_bboxes = {}
 
@@ -99,6 +99,10 @@ class Lang2SegTrack:
         self.frame_display = None
         self.height, self.width = None, None
         self.prev_time = 0
+
+        self.lost_obj_ids = set()  # Track which objects were lost
+        self.prev_obj_ids = set()  # Track previous frame's object IDs
+
 
     def input_thread(self):
         while True:
@@ -442,7 +446,7 @@ class Lang2SegTrack:
                     # self.prompts['prompts'].append(mask)
                     # self.all_forward_masks.setdefault(obj_id, []).append(mask)
                 self.prompts['prompts'] = self.existing_obj_outputs.copy()
-
+                
         # Draw incision area and statistics
         self.draw_incision_area(frame)
         self.draw_counting_stats(frame)
@@ -695,7 +699,7 @@ class Lang2SegTrack:
 
                 if self.current_text_prompt is not None:
                     if (state['num_frames']-1) % self.detection_frequency == 0 or self.last_text_prompt is None:
-                        detection= self.yolo.detect([frame], classes= [0, 13])[0]
+                        detection= self.yolo.detect([frame], classes= [7,13,14])[0]
                         
                         scores = detection['scores'].cpu().numpy()
                         labels = detection['labels']
