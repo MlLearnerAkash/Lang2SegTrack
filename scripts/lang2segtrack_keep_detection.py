@@ -901,7 +901,7 @@ class Lang2SegTrack:
     def __init__(self, sam_type:str="sam2.1_hiera_tiny", model_path:str="models/sam2/checkpoints/sam2.1_hiera_large.pt",
                  video_path:str="", output_path:str="", use_txt_prompt:bool=False, max_frames:int=60,
                  first_prompts: list | None = None, save_video=True, device="cuda:0", mode="realtime",
-                 yolo_path= "/data/dataset/weights/opervu_seg_46SIs_211125/opervu_46SIs_21112025_2/weights/best.pt",
+                 yolo_path= "/Users/akashmanna/ws/opervu/unobstructed_view_gen/yolo_projection/best_wo_specialised_training.pt",
                  conservativeness="high"):
         self.sam_type = sam_type
         self.model_path = model_path
