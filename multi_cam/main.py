@@ -3,9 +3,16 @@ import numpy as np
 import cv2
 
 import sort
-import utilities
-import homography_tracker
+# import utilities
+# import homography_tracker
+from models.yolo.detection import YOLODetector
+from models.sam2.sam import SAM
+from concurrent.futures import ThreadPoolExecutor
 
+def run_tracker(tracker, incision_area, prompt):
+    tracker.set_incision_area(incision_area)
+    tracker.current_text_prompt = prompt
+    tracker.track()
 
 def main(opts):
     video1 = cv2.VideoCapture(opts.video1)
@@ -13,81 +20,136 @@ def main(opts):
     video2 = cv2.VideoCapture(opts.video2)
     assert video2.isOpened(), f"Could not open video2 source {opts.video2}"
 
-    cam4_H_cam1 = np.load(opts.homography)
+    cam4_H_cam1 = np.eye(3)#np.load(opts.homography)
     cam1_H_cam4 = np.linalg.inv(cam4_H_cam1)
 
     homographies = list()
     homographies.append(np.eye(3))
     homographies.append(cam1_H_cam4)
 
-    detector = torch.hub.load("ultralytics/yolov5", "yolov5m")
-    detector.agnostic = True
+    # detector = torch.hub.load("ultralytics/yolov5", "yolov5m")
+    # detector.agnostic = True
 
-    # Class 0 is Person
-    detector.classes = [67]
-    detector.conf = opts.conf
+    # # Class 0 is Person
+    # detector.classes = [67]
+    # detector.conf = opts.conf
 
+    # Initialize shared models once
+    print("Initializing shared YOLO model...")
+    shared_yolo = YOLODetector(
+        # "/data/dataset/weights/base_weight/weights/best_wo_specialised_training.pt", 
+        "/data/dataset/weights/opervu_seg_46SIs_211125/opervu_46SIs_21112025_2/weights/best.pt",
+        conf_thres=0.85,
+        # iou_thres= 0.15
+    )
+    # print(">>>>>>>>>", shared_yolo.names)
+    print("Initializing shared SAM model...")
+    shared_sam = SAM()
+    shared_sam.build_model(
+        "sam2.1_hiera_large",
+        "./../models/sam2/checkpoints/sam2.1_hiera_large.pt",
+        predictor_type="video",
+        device="cuda:0",
+        use_txt_prompt=True
+    )
+
+    # Create trackers with shared models
     trackers = [
         sort.Sort(
-            max_age=opts.max_age, min_hits=opts.min_hits, iou_threshold=opts.iou_thres
+            shared_yolo=shared_yolo,
+            shared_sam=shared_sam,
+            video_path= video,
+            save_video=True,
+            use_txt_prompt=True,
+            mode="video",
+            output_path= output_path,
         )
-        for _ in range(2)
+        for video, output_path in zip([opts.video1, opts.video2], ["video1.mp4",
+                                                                   "video2.mp4"])
     ]
-    global_tracker = homography_tracker.MultiCameraTracker(homographies, iou_thres=0.20)
 
-    num_frames1 = video1.get(cv2.CAP_PROP_FRAME_COUNT)
-    num_frames2 = video2.get(cv2.CAP_PROP_FRAME_COUNT)
-    num_frames = min(num_frames2, num_frames1)
-    num_frames = int(num_frames)
-
-    # NOTE: Second video 'cam4.mp4' is 17 frames behind the first video 'cam1.mp4'
-    video2.set(cv2.CAP_PROP_POS_FRAMES, 17)
-
-    video = None
-    for idx in range(num_frames):
-        # Get frames
-        frame1 = video1.read()[1]
-        frame2 = video2.read()[1]
-
-        # NOTE: YoloV5 expects the images to be RGB instead of BGR
-        frames = [frame1[:, :, ::-1], frame2[:, :, ::-1]]
-
-        anno = detector(frames)
-
-        dets, tracks = [], []
-        for i in range(len(anno)):
-            # Sort Tracker requires (x1, y1, x2, y2) bounding box shape
-            det = anno.xyxy[i].cpu().numpy()
-            det[:, :4] = np.int0(det[:, :4])
-            dets.append(det)
-
-            # Updating each tracker measures
-            tracker = trackers[i].update(det[:, :4], det[:, -1])
-            tracks.append(tracker)
-
-        global_ids = global_tracker.update(tracks)
-
-        for i in range(2):
-            frames[i] = utilities.draw_tracks(
-                frames[i][:, :, ::-1],
-                tracks[i],
-                global_ids[i],
-                i,
-                classes=detector.names,
-            )
-
-        vis = np.hstack(frames)
-
-        cv2.namedWindow("Vis", cv2.WINDOW_NORMAL)
-        cv2.imshow("Vis", vis)
-        key = cv2.waitKey(1)
-
-        if key == ord("q"):
+  # Configure trackers
+    for i, tracker in enumerate(trackers):
+        tracker.set_incision_area([700, 1040+200, 1490-200, 1790])
+        tracker.current_text_prompt = 'car'
+        tracker.initialize_tracking()
+    
+    # Process frames synchronously
+    frame_count = 0
+    while True:
+        active_trackers = 0
+        
+        for i, tracker in enumerate(trackers):
+            has_frame = tracker.process_frame()
+            if has_frame:
+                active_trackers += 1
+            else:
+                print(f"Tracker {i+1} finished")
+        
+        if active_trackers == 0:
             break
+        
+        frame_count += 1
+        print(f"Processed frame {frame_count}")
+    
+    # Cleanup
+    for tracker in trackers:
+        tracker.cleanup_tracking()
+    # global_tracker = homography_tracker.MultiCameraTracker(homographies, iou_thres=0.20)
 
-    video1.release()
-    video2.release()
-    cv2.destroyAllWindows()
+    # num_frames1 = video1.get(cv2.CAP_PROP_FRAME_COUNT)
+    # num_frames2 = video2.get(cv2.CAP_PROP_FRAME_COUNT)
+    # num_frames = min(num_frames2, num_frames1)
+    # num_frames = int(num_frames)
+
+    # # NOTE: Second video 'cam4.mp4' is 17 frames behind the first video 'cam1.mp4'
+    # video2.set(cv2.CAP_PROP_POS_FRAMES, 17)
+
+    # video = None
+    # for idx in range(num_frames):
+    #     # Get frames
+    #     frame1 = video1.read()[1]
+    #     frame2 = video2.read()[1]
+
+    #     # NOTE: YoloV5 expects the images to be RGB instead of BGR
+    #     frames = [frame1[:, :, ::-1], frame2[:, :, ::-1]]
+
+    #     anno = detector(frames)
+
+    #     dets, tracks = [], []
+    #     for i in range(len(anno)):
+    #         # Sort Tracker requires (x1, y1, x2, y2) bounding box shape
+    #         det = anno.xyxy[i].cpu().numpy()
+    #         det[:, :4] = np.int0(det[:, :4])
+    #         dets.append(det)
+
+    #         # Updating each tracker measures
+    #         tracker = trackers[i].update(det[:, :4], det[:, -1])
+    #         tracks.append(tracker)
+
+    #     global_ids = global_tracker.update(tracks)
+
+    #     for i in range(2):
+    #         frames[i] = utilities.draw_tracks(
+    #             frames[i][:, :, ::-1],
+    #             tracks[i],
+    #             global_ids[i],
+    #             i,
+    #             classes=detector.names,
+    #         )
+
+    #     vis = np.hstack(frames)
+
+    #     cv2.namedWindow("Vis", cv2.WINDOW_NORMAL)
+    #     cv2.imshow("Vis", vis)
+    #     key = cv2.waitKey(1)
+
+    #     if key == ord("q"):
+    #         break
+
+    # video1.release()
+    # video2.release()
+    # cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
