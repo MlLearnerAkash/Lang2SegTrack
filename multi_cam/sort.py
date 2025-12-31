@@ -87,7 +87,7 @@ class Sort(object):
         else:
             self.prompts = {'prompts': [], 'labels': [], 'scores': []}
         self.iou_threshold = 0.3
-        self.detection_frequency =10
+        self.detection_frequency =30
         self.object_labels = {}
         self.last_known_bboxes = {}
 
@@ -147,6 +147,30 @@ class Sort(object):
         pooled_features = pooled_features.view(pooled_features.shape[0], -1)
         
         return pooled_features.numpy()
+
+    def extract_features_from_masks(self, frame, masks, force_yolo_run=True):
+        """Extract features consistently from masks using same YOLO forward pass"""
+        if len(masks) == 0:
+            return np.array([])
+        
+        # Force a fresh YOLO inference to get current feature maps
+        if force_yolo_run:
+            with torch.no_grad():
+                _ = self.yolo.model(frame)  # This updates self.feature_maps
+        
+        # Convert masks to bounding boxes
+        boxes = []
+        for mask in masks:
+            nonzero = np.argwhere(mask)
+            if nonzero.size > 0:
+                y_min, x_min = nonzero.min(axis=0)
+                y_max, x_max = nonzero.max(axis=0)
+                boxes.append([x_min, y_min, x_max, y_max])
+        
+        if len(boxes) == 0:
+            return np.array([])
+        
+        return self.extract_features_from_boxes(frame, boxes)
 
     def match_features(self, new_features, new_boxes, new_labels):
         if len(self.existing_features) == 0 or len(new_features) == 0:
@@ -257,6 +281,9 @@ class Sort(object):
                 
                 if len(current_obj_boxes) > 0:
                     current_features = self.extract_features_from_boxes(frame, current_obj_boxes)
+                    # current_features= self.extract_features_from_masks(
+                    #                                                 frame, self.current_frame_masks, force_yolo_run=True
+                    #                                             )
                     for obj_id, feat in zip(obj_ids, current_features):
                         self.existing_features[obj_id] = feat
                 

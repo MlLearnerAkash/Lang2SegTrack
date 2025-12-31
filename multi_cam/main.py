@@ -42,7 +42,7 @@ def main(opts):
         conf_thres=0.85,
         # iou_thres= 0.15
     )
-    # print(">>>>>>>>>", shared_yolo.names)
+    print(">>>>>>>>>", shared_yolo.names)
     print("Initializing shared SAM model...")
     shared_sam = SAM()
     shared_sam.build_model(
