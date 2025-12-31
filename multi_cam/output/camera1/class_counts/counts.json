@@ -1,0 +1,10 @@
+{
+  "frame_number": 565,
+  "classes": {
+    "sponge": {
+      "IN": 18,
+      "OUT": 19,
+      "total": 37
+    }
+  }
+}

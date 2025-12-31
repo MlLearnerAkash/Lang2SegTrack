@@ -1,8 +1,9 @@
 import torch
 import numpy as np
 import cv2
-
+from pathlib import Path
 import sort
+import json
 # import utilities
 # import homography_tracker
 from models.yolo.detection import YOLODetector
@@ -39,7 +40,7 @@ def main(opts):
     shared_yolo = YOLODetector(
         # "/data/dataset/weights/base_weight/weights/best_wo_specialised_training.pt", 
         "/data/dataset/weights/opervu_seg_46SIs_211125/opervu_46SIs_21112025_2/weights/best.pt",
-        conf_thres=0.85,
+        conf_thres=0.45,
         # iou_thres= 0.15
     )
     print(">>>>>>>>>", shared_yolo.names)
@@ -52,6 +53,16 @@ def main(opts):
         device="cuda:0",
         use_txt_prompt=True
     )
+
+    output_dirs = [
+        Path("./output/camera1"),
+        Path("./output/camera2")
+    ]
+
+    for out_dir in output_dirs:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "frames").mkdir(exist_ok=True)
+        (out_dir / "class_counts").mkdir(exist_ok=True)
 
     # Create trackers with shared models
     trackers = [
@@ -79,9 +90,35 @@ def main(opts):
     while True:
         active_trackers = 0
         
+        per_frame_class_count= []
+        frames= []
         for i, tracker in enumerate(trackers):
-            has_frame = tracker.process_frame()
-            if has_frame:
+            frame ,class_count, ret = tracker.process_frame()
+            per_frame_class_count.append(class_count)
+
+            #Saving the result
+            if frame is not None:
+                frame_filename= "frame.jpg"
+                frame_path= output_dirs[i]/"frames"/frame_filename
+                cv2.imwrite(str(frame_path), frame)
+            
+            if class_count:
+                counts_data = {
+                    "frame_number": frame_count,
+                    "classes": {}
+                    }
+                count_filename= "counts.json"
+                count_path = output_dirs[i]/"class_counts"/count_filename
+                with open(count_path, 'w') as f:
+                    for category, counts in class_count.items():
+                        counts_data["classes"][category] = {
+                            "IN": int(counts['IN']),
+                            "OUT": int(counts['OUT']),
+                            "total": int(counts['IN'] + counts['OUT'])
+                        }
+                    json.dump(counts_data, f, indent=2)
+
+            if ret:
                 active_trackers += 1
             else:
                 print(f"Tracker {i+1} finished")
@@ -91,6 +128,13 @@ def main(opts):
         
         frame_count += 1
         print(f"Processed frame {frame_count}")
+        print("="*20)
+        # Now save the frame and the output
+        
+        # for i, class_count in enumerate(per_frame_class_count):
+        #     print(f"Tracker {i+1} class counts: {class_count}")
+
+        print("="*20)
     
     # Cleanup
     for tracker in trackers:

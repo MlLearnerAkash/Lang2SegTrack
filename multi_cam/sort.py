@@ -239,6 +239,7 @@ class Sort(object):
                 pt = torch.tensor([[x, y]], dtype=torch.float32)
                 lbl = torch.tensor([1], dtype=torch.int32)
                 predictor.add_new_points_or_box(state, points=pt, labels=lbl, frame_idx=frame_idx, obj_id=id)
+    
     def draw_mask_and_bbox(self, frame, mask, bbox, obj_id):
         mask_img = np.zeros((self.height, self.width, 3), dtype=np.uint8)
         mask_img[mask] = COLOR[obj_id % len(COLOR)]
@@ -275,8 +276,11 @@ class Sort(object):
                         bbox = [x_min, y_min, x_max - x_min, y_max - y_min]
                         self.last_known_bboxes[obj_id] = bbox
                         current_obj_boxes.append([x_min, y_min, x_max, y_max])
-                    self.draw_mask_and_bbox(frame, mask, bbox, obj_id)
+
+                    
                     category_name = self.object_labels.get(obj_id, "unknown")
+                    self.draw_mask_and_bbox(frame, mask, bbox, obj_id)
+                    self.update_counting(obj_id, bbox, category_name)
                     self.existing_obj_outputs.append([bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]])
                 
                 if len(current_obj_boxes) > 0:
@@ -289,7 +293,9 @@ class Sort(object):
                 
                 self.prompts['prompts'] = self.existing_obj_outputs.copy()
         
-        
+        self.draw_incision_area(frame)
+        class_count= self.draw_counting_stats(frame)
+
         frame_text = f"Frame: {state['num_frames']}"
         # print("=="*20)
         # print("STATS FOR FRAME: #",state['num_frames'])
@@ -302,6 +308,9 @@ class Sort(object):
         if writer:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             writer.append_data(rgb)
+        return class_count
+
+    
     def convert_boxes_to_masks(self, frame, boxes):
         if len(boxes) == 0:
             return [], []
@@ -334,140 +343,7 @@ class Sort(object):
             scores.append(float(score[0]))
         
         return masks, scores
-    
-    def track(self):
 
-        predictor = self.sam.video_predictor
-
-        if self.mode == "realtime":
-            print("Start with realtime mode.")
-            pipeline = rs.pipeline()
-            config = rs.config()
-            config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-            pipeline.start(config)
-            frames = pipeline.wait_for_frames()
-            color_frame = frames.get_color_frame()
-            color_image = np.asanyarray(color_frame.get_data())
-            get_frame = lambda: np.asanyarray(pipeline.wait_for_frames().get_color_frame().get_data())
-        elif self.mode == "video":
-            print("Start with video mode.")
-            cap = cv2.VideoCapture(self.video_path)
-            ret, color_image = cap.read()
-            get_frame = lambda: cap.read()
-        else:
-            raise ValueError("The mode is not supported in this method.")
-
-        self.height, self.width = color_image.shape[:2]
-
-        if self.save_video:
-            writer = imageio.get_writer(self.output_path, fps=5)
-        else:
-            writer = None
-
-        threading.Thread(target=self.input_thread, daemon=True).start()
-
-        with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
-            state = predictor.init_state_from_numpy_frames([color_image], offload_state_to_cpu=False, offload_video_to_cpu=False)
-            while True:
-                if self.mode == "realtime":
-                    frame = get_frame()
-                else:
-                    ret, frame = get_frame()
-                    if not ret:
-                        break
-                self.frame_display = frame.copy()
-
-                if not self.input_queue.empty():
-                    self.current_text_prompt = self.input_queue.get()
-
-                if self.current_text_prompt is not None:
-                    if (state['num_frames']-1) % self.detection_frequency == 0 or self.last_text_prompt is None:
-                        detection= self.yolo.detect([frame], classes= [14])[0] #7,13,
-                        
-                        scores = detection['scores'].cpu().numpy()
-                        labels = detection['labels']
-                        boxes = detection['boxes'].cpu().numpy().tolist()
-
-                        boxes_np = np.array(boxes, dtype=np.int32)
-                        labels_np = np.array(labels)
-                        scores_np = np.array(scores)
-                        filter_mask = scores > 0.3
-                        valid_boxes = boxes_np[filter_mask]
-                        valid_labels = labels_np[filter_mask]
-                        valid_scores = scores_np[filter_mask]
-
-                        if self.last_text_prompt != self.current_text_prompt:
-                            self.prompts['prompts'].extend(valid_boxes)
-                            self.prompts['labels'].extend(valid_labels)
-                            self.prompts['scores'].extend(valid_scores)
-                            self.add_new = True
-                        elif len(valid_boxes) > 0:
-                            print(f"Checking {len(valid_boxes)} YOLO detections with feature matching...")
-                            
-                            valid_masks, mask_scores = self.convert_boxes_to_masks(frame, valid_boxes)
-                            new_features = self.extract_features_from_boxes(frame, valid_boxes)
-                            
-                            matched_boxes, matched_labels = self.match_features(
-                                new_features, valid_masks, valid_labels
-                            )
-                            
-                            if len(matched_boxes) > 0:
-                                print(f"  Adding {len(matched_boxes)} new detections after feature matching")
-                                self.prompts['prompts'].extend(matched_boxes)
-                                self.prompts['labels'].extend(matched_labels)
-                                self.prompts['scores'].extend([None] * len(matched_boxes))
-                                self.add_new = True
-                            else:
-                                print(f"  No new detections to add - all {len(valid_boxes)} detections matched existing objects")
-    
-                    self.last_text_prompt = self.current_text_prompt
-
-                if self.add_new:
-                    existing_obj_ids = set(state["obj_ids"])
-                    predictor.reset_state(state)
-                    self.add_to_state(predictor, state, self.prompts)
-                    current_obj_ids = set(state["obj_ids"])
-                    newly_added_ids = current_obj_ids - existing_obj_ids
-                predictor.append_frame_to_inference_state(state, frame)
-                self.track_and_visualize(predictor, state, frame, writer)
-                if self.add_new:
-                    for idx, obj_id in enumerate(newly_added_ids):
-                        self.object_start_frame_idx[obj_id] = state['num_frames'] - 1
-                        
-                        prompt_idx = len(self.prompts['prompts']) - len(newly_added_ids) + idx
-                        if prompt_idx < len(self.prompts['labels']) and self.prompts['labels'][prompt_idx] is not None:
-                            class_id = self.prompts['labels'][prompt_idx]
-                            class_name = self.yolo.model.names.get(class_id, f"class_{class_id}")
-                            self.object_labels[obj_id] = class_name
-                            print(f"  Object {obj_id} assigned class: {class_name}")
-                        else:
-                            self.object_labels[obj_id] = "unknown"
-                    
-                    self.add_new = False
-
-                if state["num_frames"] % self.max_frames == 0:
-                    if len(state["output_dict"]["non_cond_frame_outputs"]) != 0:
-                        predictor.append_frame_as_cond_frame(state, state["num_frames"] - 2)
-                    predictor.release_old_frames(state)
-
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord('q'):
-                    break
-
-        if self.mode == "realtime":
-            pipeline.stop()
-        else:
-            cap.release()
-        
-        self.print_final_statistics()
-        
-        if writer:
-            writer.close()
-        cv2.destroyAllWindows()
-        del predictor, state
-        gc.collect()
-        torch.clear_autocast_cache()
-        torch.cuda.empty_cache()
 
     def initialize_tracking(self):
         """Initialize tracking state without starting the main loop"""
@@ -497,6 +373,79 @@ class Sort(object):
         
         self.initialized = True
     
+    def is_inside_incision(self, bbox):
+        if self.incision_area is None:
+            return False
+        
+        x, y, w, h = bbox
+        center_x = x + w // 2
+        center_y = y + h // 2
+        
+        result = cv2.pointPolygonTest(self.incision_area, (int(center_x), int(center_y)), False)
+        return result >= 0
+    
+    def update_counting(self, obj_id, bbox, category_name):
+            if self.incision_area is None:
+                return
+            
+            x, y, w, h = bbox
+            current_centroid = (int(x + w // 2), int(y + h // 2))
+            
+            if obj_id not in self.object_track_history:
+                self.object_track_history[obj_id] = []
+            
+            self.object_track_history[obj_id].append(current_centroid)
+            
+            if len(self.object_track_history[obj_id]) > 30:
+                self.object_track_history[obj_id].pop(0)
+            
+            if len(self.object_track_history[obj_id]) < 2:
+                return
+            
+            prev_centroid = self.object_track_history[obj_id][-2]
+            
+            is_inside_now = self.is_centroid_inside_incision(current_centroid)
+            was_inside = self.is_centroid_inside_incision(prev_centroid)
+            
+            if is_inside_now and not was_inside:
+                self.classwise_count[category_name]["IN"] += 1
+                print(f"  {category_name} obj_{obj_id} ENTERED incision (IN count: {self.classwise_count[category_name]['IN']})")
+                
+            elif not is_inside_now and was_inside:
+                self.classwise_count[category_name]["OUT"] += 1
+                print(f"  {category_name} obj_{obj_id} EXITED incision (OUT count: {self.classwise_count[category_name]['OUT']})")
+
+   
+    def is_centroid_inside_incision(self, centroid):
+        if self.incision_area is None:
+            return False
+        
+        result = cv2.pointPolygonTest(self.incision_area, centroid, False)
+        return result >= 0
+    
+    def draw_incision_area(self, frame):
+        if self.incision_area is not None:
+            cv2.polylines(frame, [self.incision_area], True, (0, 255, 255), 3)
+            cv2.putText(frame, "INCISION AREA", 
+                       tuple(self.incision_area[0]), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+    
+    def draw_counting_stats(self, frame):
+        if self.incision_area is None:
+            return
+        
+        y_offset = 70
+        for category_name in sorted(self.classwise_count.keys()):
+            in_count = self.classwise_count[category_name]["IN"]
+            out_count = self.classwise_count[category_name]["OUT"]
+            
+            stats_text = f"{category_name}: IN={in_count} OUT={out_count}"
+            cv2.putText(frame, stats_text, (10, y_offset), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2, cv2.LINE_AA)
+            y_offset += 30
+        return self.classwise_count
+
+
     def process_frame(self):
         """Process a single frame. Returns False if video ended."""
         if not self.initialized:
@@ -564,7 +513,7 @@ class Sort(object):
                 current_obj_ids = set(state["obj_ids"])
                 newly_added_ids = current_obj_ids - existing_obj_ids
             predictor.append_frame_to_inference_state(state, frame)
-            self.track_and_visualize(predictor, state, frame, self.writer)
+            class_count= self.track_and_visualize(predictor, state, frame, self.writer)
             if self.add_new:
                 for idx, obj_id in enumerate(newly_added_ids):
                     self.object_start_frame_idx[obj_id] = state['num_frames'] - 1
@@ -584,7 +533,7 @@ class Sort(object):
                 if len(state["output_dict"]["non_cond_frame_outputs"]) != 0:
                     predictor.append_frame_as_cond_frame(state, state["num_frames"] - 2)
                 predictor.release_old_frames(state)
-        return True
+        return frame, class_count, True
 
 
     def cleanup_tracking(self):
