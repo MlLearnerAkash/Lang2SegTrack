@@ -30,6 +30,11 @@ from utilities.utils import save_frames_to_temp_dir, get_object_iou, batch_mask_
     visualize_selected_masks_as_video, filter_mask_outliers
 from utilities.ObjectInfoManager import ObjectInfoManager
 
+
+from filterpy.kalman import KalmanFilter
+from filterpy.common import Q_discrete_white_noise
+from scipy.optimize import linear_sum_assignment
+
 class Sort(object):
     def __init__(self, sam_type:str="sam2.1_hiera_tiny", model_path:str="./../models/sam2/checkpoints/sam2.1_hiera_large.pt",
                  video_path:str="", output_path:str="", use_txt_prompt:bool=False, max_frames:int=60,
@@ -110,8 +115,17 @@ class Sort(object):
         self.feature_match_threshold = 0.25
         self.feature_maps = None
         self.existing_features = {}
+
+
+        self.active_yolo_track_ids = set()  # Track IDs seen across all frames
+        self.tracking_lookback_frames = 5 
+
         
         self._setup_feature_extraction()
+
+        #for kalman filter
+        self.kalman_filters = {}
+        self.object_bboxes = {}
 
     def _setup_feature_extraction(self):
         target_layer_index = -2
@@ -122,6 +136,166 @@ class Sort(object):
         
         target_layer.register_forward_hook(hook_fn)
 
+    def _init_kalman_filter(self, bbox):
+        """Initialize Kalman filter for bbox tracking"""
+        kf = KalmanFilter(dim_x=4, dim_z=2)
+        
+        # State: [center_x, center_y, width, height]
+        cx = (bbox[0] + bbox[2]) / 2.0
+        cy = (bbox[1] + bbox[3]) / 2.0
+        w = bbox[2] - bbox[0]
+        h = bbox[3] - bbox[1]
+        
+        kf.x = np.array([[cx], [cy], [w], [h]], dtype=float)
+        kf.F = np.array([[1, 0, 0, 0],
+                         [0, 1, 0, 0],
+                         [0, 0, 1, 0],
+                         [0, 0, 0, 1]], dtype=float)
+        kf.H = np.array([[1, 0, 0, 0],
+                         [0, 1, 0, 0]], dtype=float)
+        kf.P *= 1000.0
+        kf.R = np.eye(2) * 10.0
+        kf.Q = Q_discrete_white_noise(dim=2, dt=1, var=0.1, block_size=2)
+        
+        return kf
+
+    def _predict_bbox(self, obj_id):
+        """Predict bbox from Kalman filter"""
+        if obj_id not in self.kalman_filters:
+            return self.object_bboxes.get(obj_id)
+        
+        kf = self.kalman_filters[obj_id]
+        kf.predict()
+        
+        cx, cy, w, h = kf.x.flatten()
+        x1 = max(0, cx - w / 2.0)
+        y1 = max(0, cy - h / 2.0)
+        x2 = cx + w / 2.0
+        y2 = cy + h / 2.0
+        
+        return np.array([x1, y1, x2, y2])
+
+    def _update_kalman_filter(self, obj_id, bbox):
+        """Update Kalman filter with new measurement"""
+        if obj_id not in self.kalman_filters:
+            self.kalman_filters[obj_id] = self._init_kalman_filter(bbox)
+        
+        kf = self.kalman_filters[obj_id]
+        cx = (bbox[0] + bbox[2]) / 2.0
+        cy = (bbox[1] + bbox[3]) / 2.0
+        z = np.array([[cx], [cy]])
+        
+        kf.update(z)
+
+    def _calculate_iou(self, box1, box2):
+        """Calculate IoU between two boxes [x1, y1, x2, y2]"""
+        x1_min, y1_min, x1_max, y1_max = box1
+        x2_min, y2_min, x2_max, y2_max = box2
+        
+        inter_xmin = max(x1_min, x2_min)
+        inter_ymin = max(y1_min, y2_min)
+        inter_xmax = min(x1_max, x2_max)
+        inter_ymax = min(y1_max, y2_max)
+        
+        if inter_xmax < inter_xmin or inter_ymax < inter_ymin:
+            return 0.0
+        
+        inter_area = (inter_xmax - inter_xmin) * (inter_ymax - inter_ymin)
+        box1_area = (x1_max - x1_min) * (y1_max - y1_min)
+        box2_area = (x2_max - x2_min) * (y2_max - y2_min)
+        union_area = box1_area + box2_area - inter_area
+        
+        return inter_area / union_area if union_area > 0 else 0.0
+
+    def _bbox_from_mask(self, mask):
+        """Convert boolean mask to bbox [x1, y1, x2, y2]"""
+        if isinstance(mask, np.ndarray) and mask.dtype == bool:
+            nonzero = np.argwhere(mask)
+            if nonzero.size == 0:
+                return None
+            y_min, x_min = nonzero.min(axis=0)
+            y_max, x_max = nonzero.max(axis=0)
+            return np.array([x_min, y_min, x_max, y_max])
+        else:
+            # Already a bbox [x1, y1, x2, y2]
+            return np.array(mask, dtype=float)
+
+
+    def _calculate_combined_cost(self, obj_id, detection_bbox, detection_feature,
+                                 w_iou=0.4, w_feature=0.3, w_motion=0.3,
+                                 iou_threshold=0.1):
+        """
+        Calculate combined cost for associating detection to track
+        
+        Args:
+            obj_id: Tracking object ID
+            detection_bbox: Detection bbox [x1, y1, x2, y2]
+            detection_feature: Feature vector for detection
+            w_iou: Weight for IoU cost
+            w_feature: Weight for feature cost
+            w_motion: Weight for motion cost
+            iou_threshold: Minimum IoU for gating
+        
+        Returns:
+            cost: Combined cost (lower is better), or np.inf if invalid
+        """
+        # 1. Predict track position using Kalman filter
+        predicted_bbox = self._predict_bbox(obj_id)
+        if predicted_bbox is None:
+            if obj_id in self.object_bboxes:
+                predicted_bbox = self.object_bboxes[obj_id]
+            else:
+                # No prediction and no history - can only use feature matching
+                # This happens on first frame detection
+                if obj_id in self.existing_features and detection_feature is not None:
+                    feature_cost = cosine(self.existing_features[obj_id], detection_feature)
+                    feature_cost = min(1.0, feature_cost / 2.0)
+                    return 0.5 * feature_cost  # Use only feature cost
+                else:
+                    return np.inf  # Truly can't match
+        # 2. IoU-based gating (filter out unlikely matches early)
+        iou = self._calculate_iou(predicted_bbox, detection_bbox)
+        # IMPORTANT: Use stricter gating only if we have good prediction
+        # If using fallback bbox, be more lenient
+        effective_iou_threshold = iou_threshold
+        if obj_id not in self.kalman_filters:
+            effective_iou_threshold = iou_threshold * 0.5  # Be more lenient with fallback
+        
+        if iou < effective_iou_threshold:
+            return np.inf  # Don't consider this association
+
+        iou_cost = 1.0 - iou  # Cost: 0 (perfect) to 1 (no overlap)
+        
+        # 3. Feature matching cost (cosine distance)
+        if obj_id in self.existing_features and detection_feature is not None:
+            feature_cost = cosine(self.existing_features[obj_id], detection_feature)
+        else:
+            feature_cost = 0.5  # Neutral cost if features unavailable
+        
+        # Clamp feature cost to [0, 1]
+        feature_cost = min(1.0, feature_cost / 2.0)
+        
+        # 4. Motion consistency cost (center distance normalized by track size)
+        pred_cx = (predicted_bbox[0] + predicted_bbox[2]) / 2.0
+        pred_cy = (predicted_bbox[1] + predicted_bbox[3]) / 2.0
+        det_cx = (detection_bbox[0] + detection_bbox[2]) / 2.0
+        det_cy = (detection_bbox[1] + detection_bbox[3]) / 2.0
+        
+        center_distance = np.sqrt((pred_cx - det_cx)**2 + (pred_cy - det_cy)**2)
+        
+        # Normalize by track size
+        track_w = predicted_bbox[2] - predicted_bbox[0]
+        track_h = predicted_bbox[3] - predicted_bbox[1]
+        track_size = np.sqrt(track_w * track_h)
+        
+        motion_cost = min(1.0, center_distance / (track_size + 1e-6))
+        # 5. Weighted combination
+        total_cost = (w_iou * iou_cost + 
+                     w_feature * feature_cost + 
+                     w_motion * motion_cost)
+        
+        return total_cost
+   
     def extract_features_from_boxes(self, frame, boxes):
         if len(boxes) == 0:
             return np.array([])
@@ -204,6 +378,124 @@ class Sort(object):
                 used_indices.add(best_match_id)
         
         return matched_boxes, matched_labels
+    def match_features_combined(self, new_features, new_boxes, new_labels):
+        """
+        Enhanced matching using combined cost function with fallbacks
+        """
+        if len(self.existing_features) == 0 or len(new_features) == 0:
+            return new_boxes, new_labels
+        
+        existing_ids = list(self.existing_features.keys())
+        n_tracks = len(existing_ids)
+        n_detections = len(new_features)
+        
+        # Step 1: Convert all detections to bboxes
+        detection_bboxes = []
+        valid_det_indices = []
+        
+        for d_idx, det_box in enumerate(new_boxes):
+            bbox = self._bbox_from_mask(det_box)
+            if bbox is not None:
+                detection_bboxes.append(bbox)
+                valid_det_indices.append(d_idx)
+        
+        # If no valid detections, all are new
+        if len(detection_bboxes) == 0:
+            print(f"  No valid detection bboxes - treating all {len(new_boxes)} as new tracks")
+            return new_boxes, new_labels
+        
+        n_detections_valid = len(detection_bboxes)
+        
+        # Step 2: Build cost matrix using combined cost
+        cost_matrix = np.full((n_tracks, n_detections_valid), np.inf)
+        
+        for t_idx, obj_id in enumerate(existing_ids):
+            for d_idx, det_bbox in enumerate(detection_bboxes):
+                cost = self._calculate_combined_cost(
+                    obj_id,
+                    det_bbox,
+                    new_features[valid_det_indices[d_idx]],
+                    w_iou=0.2,
+                    w_feature=0.6,
+                    w_motion=0.2,
+                    iou_threshold=0.1
+                )
+                cost_matrix[t_idx, d_idx] = cost
+        
+        print(f"  Cost matrix shape: {cost_matrix.shape}")
+        print(f"  Inf count: {np.sum(np.isinf(cost_matrix))}/{cost_matrix.size}")
+        
+        # Step 3: Check if cost matrix is feasible
+        if np.all(np.isinf(cost_matrix)):
+            print(f"  ⚠ Cost matrix all inf - no spatial overlap detected")
+            print(f"    Using feature-only matching as fallback...")
+            
+            # Fallback: Use ONLY feature similarity
+            cost_matrix = np.full((n_tracks, n_detections_valid), np.inf)
+            
+            for t_idx, obj_id in enumerate(existing_ids):
+                if obj_id not in self.existing_features:
+                    continue
+                
+                track_feat = self.existing_features[obj_id]
+                
+                for d_idx, det_feat in enumerate(new_features[valid_det_indices]):
+                    feature_cost = cosine(track_feat, det_feat)
+                    feature_cost = min(1.0, feature_cost / 2.0)
+                    cost_matrix[t_idx, d_idx] = feature_cost
+            
+            # If still all inf, all detections are new
+            if np.all(np.isinf(cost_matrix)):
+                print(f"  ⚠ Feature matching also failed - treating all as new tracks")
+                return new_boxes, new_labels
+            
+            print(f"  ✓ Using feature-only cost matrix")
+        
+        # Step 4: Hungarian algorithm for optimal assignment
+        try:
+            track_indices, detection_indices = linear_sum_assignment(cost_matrix)
+        except ValueError as e:
+            print(f"  ✗ Hungarian algorithm failed: {e}")
+            return new_boxes, new_labels
+        
+        # Step 5: Extract matches
+        matched_detection_indices = set()
+        max_cost_threshold = 0.7  # Tunable: higher = more permissive
+        
+        for t_idx, d_idx in zip(track_indices, detection_indices):
+            cost = cost_matrix[t_idx, d_idx]
+            
+            # Accept only if cost is below threshold and not infinity
+            if cost < max_cost_threshold and not np.isinf(cost):
+                obj_id = existing_ids[t_idx]
+                det_bbox = detection_bboxes[d_idx]
+                det_feat = new_features[valid_det_indices[d_idx]]
+                
+                # Update track
+                self.existing_features[obj_id] = det_feat
+                self.object_bboxes[obj_id] = det_bbox
+                self._update_kalman_filter(obj_id, det_bbox)
+                
+                matched_detection_indices.add(d_idx)
+        
+        # Step 6: Unmatched detections become new tracks
+        unmatched_boxes = []
+        unmatched_labels = []
+        
+        for orig_idx in range(n_detections):
+            # Check if this original detection was matched
+            matched = False
+            for valid_idx, orig_det_idx in enumerate(valid_det_indices):
+                if orig_det_idx == orig_idx and valid_idx in matched_detection_indices:
+                    matched = True
+                    break
+            
+            if not matched:
+                unmatched_boxes.append(new_boxes[orig_idx])
+                unmatched_labels.append(new_labels[orig_idx])
+        
+        print(f"  Matched: {len(matched_detection_indices)} | New: {len(unmatched_boxes)}")
+        return unmatched_boxes, unmatched_labels
     
     def input_thread(self):
         while True:
@@ -288,8 +580,13 @@ class Sort(object):
                     # current_features= self.extract_features_from_masks(
                     #                                                 frame, self.current_frame_masks, force_yolo_run=True
                     #                                             )
-                    for obj_id, feat in zip(obj_ids, current_features):
-                        self.existing_features[obj_id] = feat
+                    obj_ids_list = list(obj_ids) if not isinstance(obj_ids, list) else obj_ids
+                    for idx, obj_id in enumerate(obj_ids_list):
+                        if idx < len(current_obj_boxes):
+                            self.existing_features[obj_id] = current_features[idx]
+                            # NOTE: Updating Kalman filter
+                            self._update_kalman_filter(obj_id, np.array(current_obj_boxes[idx]))
+               
                 
                 self.prompts['prompts'] = self.existing_obj_outputs.copy()
         
@@ -458,53 +755,166 @@ class Sort(object):
         self.frame_display = frame.copy()
         predictor= self.predictor
         state= self.state
+        #NOTE: Tracking inference.
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
             if not self.input_queue.empty():
                     self.current_text_prompt = self.input_queue.get()
 
             if self.current_text_prompt is not None:
-                # state = predictor.init_state_from_numpy_frames([frame], offload_state_to_cpu=False, offload_video_to_cpu=False)
-
-                if (state['num_frames']-1) % self.detection_frequency == 0 or self.last_text_prompt is None:
-                    detection= self.yolo.detect([frame], classes= [14])[0] #7,13,
-
-                    scores = detection['scores'].cpu().numpy()
-                    labels = detection['labels']
-                    boxes = detection['boxes'].cpu().numpy().tolist()
-
-                    boxes_np = np.array(boxes, dtype=np.int32)
-                    labels_np = np.array(labels)
-                    scores_np = np.array(scores)
-                    filter_mask = scores > 0.3
-                    valid_boxes = boxes_np[filter_mask]
-                    valid_labels = labels_np[filter_mask]
-                    valid_scores = scores_np[filter_mask]
-
-                    if self.last_text_prompt != self.current_text_prompt:
-                        self.prompts['prompts'].extend(valid_boxes)
-                        self.prompts['labels'].extend(valid_labels)
-                        self.prompts['scores'].extend(valid_scores)
-                        self.add_new = True
-                    elif len(valid_boxes) > 0:
-                        print(f"Checking {len(valid_boxes)} YOLO detections with feature matching...")
+                current_frame_num = state['num_frames'] - 1
+                
+                # Only process at checkpoint intervals
+                if current_frame_num % self.detection_frequency == 0 or self.last_text_prompt is None:
+                    print(f"\n🎯 YOLO Tracking Checkpoint at Frame {current_frame_num}")
+                    print(f"   Tracking last {self.tracking_lookback_frames} frames...")
+                    
+                    # Step 1: Calculate lookback frame range
+                    start_frame = max(0, current_frame_num - self.tracking_lookback_frames + 1)
+                    
+                    # Save current video position
+                    current_pos = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
+                    
+                    # Step 2: Reset tracker to start fresh for this interval
+                    print(f"   🔄 Resetting YOLO tracker for fresh interval")
+                    _ = self.yolo.model.track(frame, persist=False, classes=[14], conf=0.3)
+                    
+                    # Step 3: Track objects across the lookback window
+                    interval_track_ids_seen = set()  # Track IDs in first frame
+                    all_track_detections = {}  # {track_id: {'bbox': [...], 'class_id': ..., 'first_frame': ...}}
+                    
+                    for frame_idx in range(start_frame, current_frame_num + 1):
+                        # Seek to specific frame
+                        self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+                        ret, lookback_frame = self.cap.read()
                         
-                        valid_masks, mask_scores = self.convert_boxes_to_masks(frame, valid_boxes)
-                        new_features = self.extract_features_from_boxes(frame, valid_boxes)
+                        if not ret:
+                            print(f"  ⚠️ Could not read frame {frame_idx}")
+                            continue
                         
-                        matched_boxes, matched_labels = self.match_features(
-                            new_features, valid_masks, valid_labels
+                        # Run tracking with persist=True to maintain IDs across this 5-frame window
+                        track_results = self.yolo.model.track(
+                            lookback_frame,
+                            persist=True,
+                            classes=[14],
+                            conf=0.8,
+                            tracker="/data/opervu/ws/ultralytics/ultralytics/cfg/trackers/botsort.yaml"
                         )
                         
-                        if len(matched_boxes) > 0:
-                            print(f"  Adding {len(matched_boxes)} new detections after feature matching")
-                            self.prompts['prompts'].extend(matched_boxes)
-                            self.prompts['labels'].extend(matched_labels)
-                            self.prompts['scores'].extend([None] * len(matched_boxes))
-                            self.add_new = True
-                        else:
-                            print(f"  No new detections to add - all {len(valid_boxes)} detections matched existing objects")
+                        # Extract track IDs from this frame
+                        current_frame_tracks = set()
+                        
+                        if track_results[0].boxes is not None and len(track_results[0].boxes) > 0:
+                            for box in track_results[0].boxes:
+                                if box.id is None:
+                                    continue
+                                
+                                track_id = int(box.id)
+                                current_frame_tracks.add(track_id)
+                                
+                                # Store track info if first time seeing it
+                                if track_id not in all_track_detections:
+                                    bbox = box.xyxy[0].cpu().numpy().astype(int).tolist()
+                                    class_id = int(box.cls)
+                                    conf = float(box.conf)
+                                    
+                                    all_track_detections[track_id] = {
+                                        'bbox': bbox,
+                                        'class_id': class_id,
+                                        'conf': conf,
+                                        'first_frame': frame_idx
+                                    }
+                        
+                        # First frame defines baseline
+                        if frame_idx == start_frame:
+                            interval_track_ids_seen = current_frame_tracks.copy()
+                            print(f"   📍 Baseline tracks at frame {start_frame}: {sorted(list(interval_track_ids_seen))}")
+                    
+                    # Step 4: Detect NEW tracks (appeared after first frame)
+                    new_track_ids = set(all_track_detections.keys()) - interval_track_ids_seen
+                    
+                    # Step 5: Restore video position to current frame
+                    self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
+                    
+                    # Step 6: Prepare new tracks for SAM2
+                    new_track_boxes = []
+                    new_track_labels = []
+                    
+                    print(f"   📊 Interval Summary:")
+                    print(f"      Frames scanned: {start_frame} to {current_frame_num}")
+                    print(f"      Baseline tracks: {len(interval_track_ids_seen)}")
+                    print(f"      Total tracks seen: {len(all_track_detections)}")
+                    print(f"      NEW tracks detected: {len(new_track_ids)}")
+                    
+                    if len(new_track_ids) > 0:
+                        print(f"   📝 New Track Details:")
+                        for track_id in sorted(new_track_ids):
+                            track_info = all_track_detections[track_id]
+                            new_track_boxes.append(track_info['bbox'])
+                            new_track_labels.append(track_info['class_id'])
+                            
+                            print(f"      🆕 Track {track_id}: first@frame{track_info['first_frame']}, "
+                                f"bbox={track_info['bbox']}, conf={track_info['conf']:.2f}")
+                    
+                    # Step 7: Add new tracks to SAM2 prompts
+                    if len(new_track_boxes) > 0:
+                        print(f"  ✅ Adding {len(new_track_boxes)} new tracks to SAM2")
+                        self.prompts['prompts'].extend(new_track_boxes)
+                        self.prompts['labels'].extend(new_track_labels)
+                        self.prompts['scores'].extend([None] * len(new_track_boxes))
+                        self.add_new = True
+                    else:
+                        print(f"  ℹ️ No new tracks detected in lookback window")
+                        if len(interval_track_ids_seen) > 0:
+                            print(f"     Baseline tracks: {sorted(list(interval_track_ids_seen))}")
 
                 self.last_text_prompt = self.current_text_prompt
+        # with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
+        #     if not self.input_queue.empty():
+        #             self.current_text_prompt = self.input_queue.get()
+
+        #     if self.current_text_prompt is not None:
+        #         # state = predictor.init_state_from_numpy_frames([frame], offload_state_to_cpu=False, offload_video_to_cpu=False)
+
+        #         if (state['num_frames']-1) % self.detection_frequency == 0 or self.last_text_prompt is None:
+        #             detection= self.yolo.detect([frame], classes= [14])[0] #7,13,
+
+        #             scores = detection['scores'].cpu().numpy()
+        #             labels = detection['labels']
+        #             boxes = detection['boxes'].cpu().numpy().tolist()
+
+        #             boxes_np = np.array(boxes, dtype=np.int32)
+        #             labels_np = np.array(labels)
+        #             scores_np = np.array(scores)
+        #             filter_mask = scores > 0.3
+        #             valid_boxes = boxes_np[filter_mask]
+        #             valid_labels = labels_np[filter_mask]
+        #             valid_scores = scores_np[filter_mask]
+
+        #             if self.last_text_prompt != self.current_text_prompt:
+        #                 self.prompts['prompts'].extend(valid_boxes)
+        #                 self.prompts['labels'].extend(valid_labels)
+        #                 self.prompts['scores'].extend(valid_scores)
+        #                 self.add_new = True
+        #             elif len(valid_boxes) > 0:
+        #                 print(f"Checking {len(valid_boxes)} YOLO detections with feature matching...")
+                        
+        #                 valid_masks, mask_scores = self.convert_boxes_to_masks(frame, valid_boxes)
+        #                 new_features = self.extract_features_from_boxes(frame, valid_boxes)
+                        
+        #                 matched_boxes, matched_labels = self.match_features(
+        #                     new_features, valid_masks, valid_labels
+        #                 )
+                        
+        #                 if len(matched_boxes) > 0:
+        #                     print(f"  Adding {len(matched_boxes)} new detections after feature matching")
+        #                     self.prompts['prompts'].extend(matched_boxes)
+        #                     self.prompts['labels'].extend(matched_labels)
+        #                     self.prompts['scores'].extend([None] * len(matched_boxes))
+        #                     self.add_new = True
+        #                 else:
+        #                     print(f"  No new detections to add - all {len(valid_boxes)} detections matched existing objects")
+
+        #         self.last_text_prompt = self.current_text_prompt
 
             if self.add_new:
                 existing_obj_ids = set(state["obj_ids"])
