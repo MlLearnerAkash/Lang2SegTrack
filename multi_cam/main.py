@@ -9,7 +9,7 @@ import json
 from models.yolo.detection import YOLODetector
 from models.sam2.sam import SAM
 from concurrent.futures import ThreadPoolExecutor
-
+import time
 def run_tracker(tracker, incision_area, prompt):
     tracker.set_incision_area(incision_area)
     tracker.current_text_prompt = prompt
@@ -40,15 +40,15 @@ def main(opts):
     shared_yolo = YOLODetector(
         # "/data/dataset/weights/base_weight/weights/best_wo_specialised_training.pt", 
         "/data/dataset/weights/opervu_seg_46SIs_211125/opervu_46SIs_21112025_2/weights/best.pt",
-        conf_thres=0.45,
-        # iou_thres= 0.15
+        conf_thres=0.25,
+        iou_thres= 0.15
     )
     print(">>>>>>>>>", shared_yolo.names)
     print("Initializing shared SAM model...")
     shared_sam = SAM()
     shared_sam.build_model(
         "sam2.1_hiera_large",
-        "./../models/sam2/checkpoints/sam2.1_hiera_large.pt",
+        "/data/opervu/ws/sam2/checkpoints/model_large_38000.pt",
         predictor_type="video",
         device="cuda:0",
         use_txt_prompt=True
@@ -135,6 +135,8 @@ def main(opts):
         #     print(f"Tracker {i+1} class counts: {class_count}")
 
         print("="*20)
+
+        time.sleep(0.5)
     
     # Cleanup
     for tracker in trackers:
