@@ -1,6 +1,9 @@
 import base64
 import os
 import sys
+from dataclasses import dataclass
+from typing import List, Dict, Optional
+import numpy as np
 
 import shutil
 import threading
@@ -34,6 +37,57 @@ from utilities.ObjectInfoManager import ObjectInfoManager
 from filterpy.kalman import KalmanFilter
 from filterpy.common import Q_discrete_white_noise
 from scipy.optimize import linear_sum_assignment
+
+@dataclass
+class Detection:
+    """Single detection with bbox and object id"""
+    bbox: List[float]  # [x1, y1, x2, y2]
+    obj_id: int
+
+    def __post_init__(self):
+        if len(self.bbox) !=4:
+            raise ValueError("Bounding box must be of length 4: [x1, y1, x2, y2]")
+        self.bbox= [float(x) for x in self.bbox]
+
+@dataclass
+class FrameData:
+    """Data for a single frame from a camera source"""
+    frame_idx: int
+    detections: List[Detection]
+
+    def add_detection(self, bbox: List[float], obj_id: int):
+        detection= Detection(bbox, obj_id)
+        self.detections.append(detection)
+    def get_bbox(self) -> List[List[float]]:
+        return [det.bbox for det in self.detections]
+    def get_obj_ids(self) -> List[int]:
+        return [det.obj_id for det in self.detections]
+
+class FrameDataManager:
+    """Manager for storing and retrieving frame data"""
+    
+    def __init__(self):
+        self.frames: Dict[int, FrameData] = {}
+        self.current_frame_idx = 0
+    
+    def add_frame_data(self, frame_idx: int, detections: List[Detection]) -> FrameData:
+        """Add complete frame data"""
+        frame_data = FrameData(frame_idx, detections)
+        self.frames[frame_idx] = frame_data
+        self.current_frame_idx = max(self.current_frame_idx, frame_idx)
+        return frame_data
+    
+    def get_current_frame_data(self) -> Optional[FrameData]:
+        """Get most recent frame data"""
+        return self.frames.get(self.current_frame_idx)
+    
+    def get_current_bboxes_and_ids(self) -> tuple:
+        """Get current frame's bboxes and object IDs as lists"""
+        current_frame = self.get_current_frame_data()
+        if current_frame:
+            return current_frame.get_bbox(), current_frame.get_obj_ids()
+        return [], []
+        # return self.frames.get(self.current_frame_idx)
 
 class Sort(object):
     def __init__(self, sam_type:str="sam2.1_hiera_tiny", model_path:str="./../models/sam2/checkpoints/sam2.1_hiera_large.pt",
@@ -126,6 +180,8 @@ class Sort(object):
         #for kalman filter
         self.kalman_filters = {}
         self.object_bboxes = {}
+
+        self.frame_data_manager = FrameDataManager()
 
     def _setup_feature_extraction(self):
         target_layer_index = -2
@@ -562,6 +618,8 @@ class Sort(object):
                 self.existing_obj_outputs = []
                 self.current_frame_masks = []
                 current_obj_boxes = []
+
+                frame_detection= []
                 for obj_id, mask in zip(obj_ids, masks):
                     mask = mask[0].cpu().numpy() > 0.0
                     mask = filter_mask_outliers(mask)
@@ -576,12 +634,15 @@ class Sort(object):
                         self.last_known_bboxes[obj_id] = bbox
                         current_obj_boxes.append([x_min, y_min, x_max, y_max])
 
-                    
+                    #Updating the frame data
                     category_name = self.object_labels.get(obj_id, "unknown")
+                    detection= Detection(bbox, obj_id)
+                    frame_detection.append(detection)
+
                     self.draw_mask_and_bbox(frame, mask, bbox, obj_id)
                     self.update_counting(obj_id, bbox, category_name)
                     self.existing_obj_outputs.append([bbox[0], bbox[1], bbox[0] + bbox[2], bbox[1] + bbox[3]])
-                
+
                 if len(current_obj_boxes) > 0:
                     current_features = self.extract_features_from_boxes(frame, current_obj_boxes)
                     # current_features= self.extract_features_from_masks(
@@ -592,11 +653,12 @@ class Sort(object):
                         if idx < len(current_obj_boxes):
                             self.existing_features[obj_id] = current_features[idx]
                             # NOTE: Updating Kalman filter
-                            self._update_kalman_filter(obj_id, np.array(current_obj_boxes[idx]))
+                            # self._update_kalman_filter(obj_id, np.array(current_obj_boxes[idx]))
                
                 
                 self.prompts['prompts'] = self.existing_obj_outputs.copy()
         
+        self.frame_data_manager.add_frame_data(frame_idx, frame_detection)
         self.draw_incision_area(frame)
         class_count= self.draw_counting_stats(frame)
 
@@ -614,6 +676,25 @@ class Sort(object):
             writer.append_data(rgb)
         return class_count
 
+    def get_current_frame_bboxes_and_ids(self):
+        """Get current frame's bboxes and object IDs"""
+        # latest_frame = self.frame_data_manager.get_latest_frame()
+        # if latest_frame:
+        #     return latest_frame.get_bboxes(), latest_frame.get_obj_ids()
+        # return [], []
+        return self.frame_data_manager.get_current_bboxes_and_ids()
+    def print_current_frame_info(self):
+        """Print current frame detection info"""
+        current_frame = self.frame_data_manager.get_current_frame_data()
+        if current_frame:
+            print(f"Frame {current_frame.frame_idx}: {len(current_frame.detections)} objects detected")
+            for det in current_frame.detections:
+                print(f"  Object {det.obj_id}: bbox={det.bbox}")
+        else:
+            print("No current frame data available")
+    def get_both_current_frame_data(self):
+        """Get boxes and ids"""
+        return self.frame_data_manager.get_current_frame_data()
     
     def convert_boxes_to_masks(self, frame, boxes):
         if len(boxes) == 0:
