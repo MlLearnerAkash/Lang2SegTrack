@@ -9,7 +9,7 @@ import homography_tracker
 from models.yolo.detection import YOLODetector
 from models.sam2.sam import SAM
 from concurrent.futures import ThreadPoolExecutor
-
+import track_utilities
 import time
 from icecream import ic
 
@@ -155,57 +155,66 @@ def main(opts):
                     print(f"  Local ID -> Global ID mapping:")
                     for local_id, global_id in local_to_global.items():
                         print(f"    Local ID {local_id} -> Global ID {global_id}")
+        for track in range(len(all_tracks)):
+            frames[track]= track_utilities.draw_projected_tracks(
+                frames[track],
+                all_tracks[track],
+                global_ids[track],
+                cam1_H_cam4,
+                # src=track
+            )
+            # vis= np.hstack(frames)
             
             #NOTE: Optionally: Draw global IDs on frames
-            for cam_idx, (frame, tracks) in enumerate(zip(frames, all_tracks)):
-                if frame is not None and len(tracks) > 0:
-                    for track in tracks:
-                        x1, y1, x2, y2, local_id = map(int, track)
-                        local_id = int(local_id)
-                        global_id = global_ids[cam_idx].get(local_id, -1)
+            # for cam_idx, (frame, tracks) in enumerate(zip(frames, all_tracks)):
+            #     if frame is not None and len(tracks) > 0:
+            #         for track in tracks:
+            #             x1, y1, x2, y2, local_id = map(int, track)
+            #             local_id = int(local_id)
+            #             global_id = global_ids[cam_idx].get(local_id, -1)
                         
-                        # Draw global ID on frame
-                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                        label = f"G:{global_id} L:{local_id}"
-                        cv2.putText(frame, label, (x1, y1 - 10), 
-                                  cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            #             # Draw global ID on frame
+            #             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            #             label = f"G:{global_id} L:{local_id}"
+            #             cv2.putText(frame, label, (x1, y1 - 10), 
+            #                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                     
-                    # Save frame with global IDs
-                    # global_frame_filename = f"frame_global_{frame_count:06d}.jpg"
-                    # global_frame_path = output_dirs[cam_idx] / "frames" / global_frame_filename
-                    # cv2.imwrite(str(global_frame_path), frame)
+            #         # Save frame with global IDs
+            #         # global_frame_filename = f"frame_global_{frame_count:06d}.jpg"
+            #         # global_frame_path = output_dirs[cam_idx] / "frames" / global_frame_filename
+            #         # cv2.imwrite(str(global_frame_path), frame)
             
-            # Optional: Create side-by-side visualization
-            if all(f is not None for f in frames):
-                # Resize frames to same height if needed
-                max_height = max(f.shape[0] for f in frames)
-                resized_frames = []
-                for f in frames:
-                    if f.shape[0] != max_height:
-                        scale = max_height / f.shape[0]
-                        new_width = int(f.shape[1] * scale)
-                        f = cv2.resize(f, (new_width, max_height))
-                    resized_frames.append(f)
-                
-                # Stack frames horizontally
-                vis = np.hstack(resized_frames)
-                
-                # Initialize video writer on first frame
-                if combined_video_writer is None:
-                    video_height, video_width = vis.shape[:2]
-                    combined_video_path = Path("./output") / "combined_tracking.mp4"
-                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                    combined_video_writer = cv2.VideoWriter(
-                        str(combined_video_path),
-                        fourcc,
-                        fps,
-                        (video_width, video_height)
-                    )
-                    print(f"\nCreating combined video: {combined_video_path}")
-                    print(f"Resolution: {video_width}x{video_height}, FPS: {fps}")
-                
-                # Write frame to video
-                combined_video_writer.write(vis)
+            # # Optional: Create side-by-side visualization
+        if all(f is not None for f in frames):
+            # Resize frames to same height if needed
+            max_height = max(f.shape[0] for f in frames)
+            resized_frames = []
+            for f in frames:
+                if f.shape[0] != max_height:
+                    scale = max_height / f.shape[0]
+                    new_width = int(f.shape[1] * scale)
+                    f = cv2.resize(f, (new_width, max_height))
+                resized_frames.append(f)
+            
+            # Stack frames horizontally
+            vis = np.hstack(resized_frames)
+            
+            # Initialize video writer on first frame
+            if combined_video_writer is None:
+                video_height, video_width = vis.shape[:2]
+                combined_video_path = Path("./output") / "combined_tracking.mp4"
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                combined_video_writer = cv2.VideoWriter(
+                    str(combined_video_path),
+                    fourcc,
+                    fps,
+                    (video_width, video_height)
+                )
+                print(f"\nCreating combined video: {combined_video_path}")
+                print(f"Resolution: {video_width}x{video_height}, FPS: {fps}")
+            
+            # Write frame to video
+            combined_video_writer.write(vis)
                         
         frame_count += 1
         print(f"\nProcessed frame {frame_count}")
