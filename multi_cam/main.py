@@ -39,16 +39,16 @@ def main(opts):
     print("Initializing shared YOLO model...")
     shared_yolo = YOLODetector(
         # "/data/dataset/weights/base_weight/weights/best_wo_specialised_training.pt", 
-        "/data/dataset/weights/opervu_seg_46SIs_211125/opervu_46SIs_21112025_2/weights/best.pt",
-        conf_thres=0.25,
-        iou_thres= 0.15
+        "/home/kamiar/ws/Lang2SegTrack/multi_cam/checkpoints/yolo_model/best.pt",
+        conf_thres=0.45,
+        # iou_thres= 0.15
     )
     # print(">>>>>>>>>", shared_yolo.names)
     print("Initializing shared SAM model...")
     shared_sam = SAM()
     shared_sam.build_model(
         "sam2.1_hiera_large",
-        "/data/opervu/ws/sam2/checkpoints/model_large_38000.pt",
+        "/home/kamiar/ws/Lang2SegTrack/multi_cam/checkpoints/sam_model/model_large_38000.pt",
         predictor_type="video",
         device="cuda:0",
         use_txt_prompt=True
@@ -97,6 +97,7 @@ def main(opts):
         frames= []
         all_tracks= []
         for i, tracker in enumerate(trackers):
+            
             frame ,class_count, ret = tracker.process_frame()
             per_frame_class_count.append(class_count)
 

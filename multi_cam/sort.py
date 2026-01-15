@@ -1,3 +1,4 @@
+#-------------------------------------------------
 import base64
 import os
 import sys
@@ -22,7 +23,8 @@ from triton.language import dtype
 from icecream import ic
 from scipy.spatial.distance import cosine
 import torchvision.ops as ops
-
+import sys
+sys.path.append("../")
 from models.gdino.models.gdino import GDINO
 from models.sam2.sam import SAM
 from models.yolo.detection import YOLODetector
