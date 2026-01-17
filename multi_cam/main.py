@@ -11,6 +11,7 @@ from models.sam2.sam import SAM
 from concurrent.futures import ThreadPoolExecutor
 import track_utilities
 import time
+import numpy as np
 from icecream import ic
 
 
@@ -25,7 +26,7 @@ def main(opts):
     video2 = cv2.VideoCapture(opts.video2)
     assert video2.isOpened(), f"Could not open video2 source {opts.video2}"
 
-    cam4_H_cam1 = np.eye(3)#np.load(opts.homography)
+    cam4_H_cam1 = np.load(opts.homography)#np.eye(3)#
     cam1_H_cam4 = np.linalg.inv(cam4_H_cam1)
 
     homographies = list()
@@ -40,8 +41,9 @@ def main(opts):
     shared_yolo = YOLODetector(
         # "/data/dataset/weights/base_weight/weights/best_wo_specialised_training.pt", 
         "/home/kamiar/ws/Lang2SegTrack/multi_cam/checkpoints/yolo_model/best.pt",
-        conf_thres=0.45,
+        conf_thres=0.25,
         # iou_thres= 0.15
+        iou_thres=0.15
     )
     # print(">>>>>>>>>", shared_yolo.names)
     print("Initializing shared SAM model...")
@@ -156,36 +158,31 @@ def main(opts):
                     print(f"  Local ID -> Global ID mapping:")
                     for local_id, global_id in local_to_global.items():
                         print(f"    Local ID {local_id} -> Global ID {global_id}")
-        for track in range(len(all_tracks)):
-            frames[track]= track_utilities.draw_projected_tracks(
-                frames[track],
-                all_tracks[track],
-                global_ids[track],
-                cam1_H_cam4,
-                # src=track
-            )
+        # for track in range(len(all_tracks)):
+        # frames[0]= track_utilities.draw_projected_tracks(
+        #     frames[0],
+        #     all_tracks[1],
+        #     global_ids[1],
+        #     cam1_H_cam4,
+        #     # src=track
+        #     color= (255, 0, 255)
+        # )
+        # frames[1]= track_utilities.draw_projected_tracks(
+        #     frames[1],
+        #     all_tracks[0],
+        #     global_ids[0],
+        #     cam4_H_cam1,
+        #     # src=track
+        #     color= (0, 0, 255)
+        # )
             # vis= np.hstack(frames)
-            
-            #NOTE: Optionally: Draw global IDs on frames
-            # for cam_idx, (frame, tracks) in enumerate(zip(frames, all_tracks)):
-            #     if frame is not None and len(tracks) > 0:
-            #         for track in tracks:
-            #             x1, y1, x2, y2, local_id = map(int, track)
-            #             local_id = int(local_id)
-            #             global_id = global_ids[cam_idx].get(local_id, -1)
-                        
-            #             # Draw global ID on frame
-            #             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            #             label = f"G:{global_id} L:{local_id}"
-            #             cv2.putText(frame, label, (x1, y1 - 10), 
-            #                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-                    
-            #         # Save frame with global IDs
-            #         # global_frame_filename = f"frame_global_{frame_count:06d}.jpg"
-            #         # global_frame_path = output_dirs[cam_idx] / "frames" / global_frame_filename
-            #         # cv2.imwrite(str(global_frame_path), frame)
-            
-            # # Optional: Create side-by-side visualization
+        homography_dict = {
+        (0, 1): cam4_H_cam1,
+        (1, 0): cam1_H_cam4,
+        }
+        frames = track_utilities.draw_all_projected_tracks(frames, all_tracks, global_ids, homography_dict)
+
+
         if all(f is not None for f in frames):
             # Resize frames to same height if needed
             max_height = max(f.shape[0] for f in frames)

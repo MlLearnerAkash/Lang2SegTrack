@@ -262,3 +262,50 @@ def draw_projected_tracks(image, tracks, ids_dict, H_src_to_dst, color=(255, 0, 
         )
     
     return vis
+
+def draw_all_projected_tracks(frames, all_tracks, global_ids, homography_dict):
+    """
+    Draw projected tracks from all cameras onto all other cameras.
+    
+    Args:
+        frames: List of frame images
+        all_tracks: List of track arrays for each camera
+        global_ids: List of global ID mappings for each camera
+        homography_dict: Dictionary mapping (src_cam, dst_cam) -> homography matrix
+    
+    Returns:
+        List of frames with projected tracks drawn
+    """
+    colors = [
+        (255, 0, 255),   # Magenta
+        (0, 255, 255),   # Cyan
+        (255, 255, 0),   # Yellow
+        (255, 128, 0),   # Orange
+        (128, 0, 255),   # Purple
+    ]
+    
+    for dst_cam_idx in range(len(frames)):
+        for src_cam_idx in range(len(all_tracks)):
+            # Skip same camera
+            if src_cam_idx == dst_cam_idx:
+                continue
+            
+            # Skip empty tracks
+            if len(all_tracks[src_cam_idx]) == 0:
+                continue
+            
+            # Get homography
+            H_key = (src_cam_idx, dst_cam_idx)
+            if H_key not in homography_dict:
+                continue
+            
+            # Draw projected tracks
+            frames[dst_cam_idx] = draw_projected_tracks(
+                frames[dst_cam_idx],
+                all_tracks[src_cam_idx],
+                global_ids[src_cam_idx],
+                homography_dict[H_key],
+                color=colors[src_cam_idx % len(colors)]
+            )
+    
+    return frames

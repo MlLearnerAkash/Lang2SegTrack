@@ -660,23 +660,23 @@ class Sort(object):
                 
                 self.prompts['prompts'] = self.existing_obj_outputs.copy()
         
-        self.frame_data_manager.add_frame_data(frame_idx, frame_detection)
-        self.draw_incision_area(frame)
-        class_count= self.draw_counting_stats(frame)
+            self.frame_data_manager.add_frame_data(frame_idx, frame_detection)
+            self.draw_incision_area(frame)
+            class_count= self.draw_counting_stats(frame)
 
-        frame_text = f"Frame: {state['num_frames']}"
-        # print("=="*20)
-        # print("STATS FOR FRAME: #",state['num_frames'])
-        # print("=="*20)
-        text_size = cv2.getTextSize(frame_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
-        text_x = self.width - text_size[0] - 10
-        text_y = 30
-        cv2.putText(frame, frame_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
+            frame_text = f"Frame: {state['num_frames']}"
+            # print("=="*20)
+            # print("STATS FOR FRAME: #",state['num_frames'])
+            # print("=="*20)
+            text_size = cv2.getTextSize(frame_text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
+            text_x = self.width - text_size[0] - 10
+            text_y = 30
+            cv2.putText(frame, frame_text, (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA)
 
-        if writer:
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            writer.append_data(rgb)
-        return class_count
+            if writer:
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                writer.append_data(rgb)
+            return class_count
 
     def get_current_frame_bboxes_and_ids(self):
         """Get current frame's bboxes and object IDs"""
@@ -845,186 +845,6 @@ class Sort(object):
         self.frame_display = frame.copy()
         predictor= self.predictor
         state= self.state
-        #NOTE: Tracking inference.
-        # with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
-        #     if not self.input_queue.empty():
-        #             self.current_text_prompt = self.input_queue.get()
-
-        #     if self.current_text_prompt is not None:
-        #         current_frame_num = state['num_frames'] - 1
-                
-        #         # Only process at checkpoint intervals
-        #         if current_frame_num % self.detection_frequency == 0 or self.last_text_prompt is None:
-        #             print(f"\n🎯 YOLO Tracking Checkpoint at Frame {current_frame_num}")
-        #             print(f"   Tracking last {self.tracking_lookback_frames} frames...")
-                    
-        #             # Step 1: Calculate lookback frame range
-        #             start_frame = max(0, current_frame_num - self.tracking_lookback_frames + 1)
-                    
-        #             # Save current video position
-        #             current_pos = self.cap.get(cv2.CAP_PROP_POS_FRAMES)
-                    
-        #             # Step 2: Reset tracker to start fresh for this interval
-        #             print(f"   🔄 Resetting YOLO tracker for fresh interval")
-        #             _ = self.yolo.model.track(frame, persist=False, classes=[14], conf=0.3)
-                    
-        #             # Step 3: Track objects across the lookback window
-        #             frame_track_ids = {}  # {frame_idx: set(track_ids)}
-        #             all_track_detections = {}  # {track_id: {'bbox': [...], 'class_id': ..., 'last_frame': ...}}
-                    
-        #             for frame_idx in range(start_frame, current_frame_num + 1):
-        #                 # Seek to specific frame
-        #                 self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-        #                 ret, lookback_frame = self.cap.read()
-                        
-        #                 if not ret:
-        #                     print(f"  ⚠️ Could not read frame {frame_idx}")
-        #                     continue
-                        
-        #                 # Run tracking with persist=True to maintain IDs across this 5-frame window
-        #                 track_results = self.yolo.model.track(
-        #                     lookback_frame,
-        #                     persist=True,
-        #                     classes=[14],
-        #                     conf=0.85,
-        #                     tracker="/data/opervu/ws/ultralytics/ultralytics/cfg/trackers/botsort.yaml"
-        #                 )
-                        
-        #                 # Extract track IDs from this frame
-        #                 current_frame_tracks = set()
-                        
-        #                 if track_results[0].boxes is not None and len(track_results[0].boxes) > 0:
-        #                     for box in track_results[0].boxes:
-        #                         if box.id is None:
-        #                             continue
-                                
-        #                         track_id = int(box.id)
-        #                         current_frame_tracks.add(track_id)
-                                
-        #                         # Store/update track info with LATEST position
-        #                         bbox = box.xyxy[0].cpu().numpy().astype(int).tolist()
-        #                         class_id = int(box.cls)
-        #                         conf = float(box.conf)
-                                
-        #                         all_track_detections[track_id] = {
-        #                             'bbox': bbox,
-        #                             'class_id': class_id,
-        #                             'conf': conf,
-        #                             'last_frame': frame_idx  # Update to latest frame
-        #                         }
-                        
-        #                 # Track IDs in each frame
-        #                 frame_track_ids[frame_idx] = current_frame_tracks
-                    
-        #             # Step 4: Detect NEW tracks (track IDs that appear in later frames but not earlier)
-        #             all_track_ids_in_interval = set()
-        #             new_track_ids = set()
-                    
-        #             # Collect all track IDs seen
-        #             for track_ids in frame_track_ids.values():
-        #                 all_track_ids_in_interval.update(track_ids)
-                    
-        #             # Find tracks that are NEW (not in first frame or earlier frames)
-        #             first_frame_tracks = frame_track_ids.get(start_frame, set())
-                    
-        #             for frame_idx in sorted(frame_track_ids.keys()):
-        #                 current_tracks = frame_track_ids[frame_idx]
-        #                 tracks_before = set()
-                        
-        #                 # Get all tracks seen BEFORE this frame
-        #                 for prev_frame_idx in frame_track_ids.keys():
-        #                     if prev_frame_idx < frame_idx:
-        #                         tracks_before.update(frame_track_ids[prev_frame_idx])
-                        
-        #                 # NEW tracks = in current frame but NOT in any previous frame
-        #                 newly_appeared = current_tracks - tracks_before
-        #                 new_track_ids.update(newly_appeared)
-                    
-        #             # Step 5: Restore video position to current frame
-        #             self.cap.set(cv2.CAP_PROP_POS_FRAMES, current_pos)
-                    
-        #             # Step 6: Prepare new tracks for SAM2 (with LAST KNOWN position)
-        #             new_track_boxes = []
-        #             new_track_labels = []
-                    
-        #             print(f"   📊 Interval Analysis:")
-        #             print(f"      Frames scanned: {start_frame} to {current_frame_num}")
-        #             print(f"      First frame tracks: {len(first_frame_tracks)}")
-        #             print(f"      Total unique tracks: {len(all_track_ids_in_interval)}")
-        #             print(f"      NEW tracks detected: {len(new_track_ids)}")
-                    
-        #             if len(new_track_ids) > 0:
-        #                 print(f"   📝 New Track Details (using LAST position):")
-        #                 for track_id in sorted(new_track_ids):
-        #                     track_info = all_track_detections[track_id]
-        #                     new_track_boxes.append(track_info['bbox'])
-        #                     new_track_labels.append(track_info['class_id'])
-                            
-        #                     print(f"      🆕 Track {track_id}: last seen@frame{track_info['last_frame']}, "
-        #                         f"bbox={track_info['bbox']}, conf={track_info['conf']:.2f}")
-                    
-        #             # Step 7: Add new tracks to SAM2 prompts
-        #             if len(new_track_boxes) > 0:
-        #                 print(f"  ✅ Adding {len(new_track_boxes)} new tracks to SAM2")
-        #                 self.prompts['prompts'].extend(new_track_boxes)
-        #                 self.prompts['labels'].extend(new_track_labels)
-        #                 self.prompts['scores'].extend([None] * len(new_track_boxes))
-        #                 self.add_new = True
-        #             else:
-        #                 print(f"  ℹ️ No new tracks detected in interval")
-        #                 print(f"     All tracks: {sorted(list(all_track_ids_in_interval))}")
-
-        #         self.last_text_prompt = self.current_text_prompt
-
-
-        # --------------- start of Feature matching ----------------------
-        # with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
-        #     if not self.input_queue.empty():
-        #             self.current_text_prompt = self.input_queue.get()
-
-        #     if self.current_text_prompt is not None:
-        #         # state = predictor.init_state_from_numpy_frames([frame], offload_state_to_cpu=False, offload_video_to_cpu=False)
-
-        #         if (state['num_frames']-1) % self.detection_frequency == 0 or self.last_text_prompt is None:
-        #             detection= self.yolo.detect([frame], classes= [14])[0] #7,13,
-
-        #             scores = detection['scores'].cpu().numpy()
-        #             labels = detection['labels']
-        #             boxes = detection['boxes'].cpu().numpy().tolist()
-
-        #             boxes_np = np.array(boxes, dtype=np.int32)
-        #             labels_np = np.array(labels)
-        #             scores_np = np.array(scores)
-        #             filter_mask = scores > 0.3
-        #             valid_boxes = boxes_np[filter_mask]
-        #             valid_labels = labels_np[filter_mask]
-        #             valid_scores = scores_np[filter_mask]
-
-        #             if self.last_text_prompt != self.current_text_prompt:
-        #                 self.prompts['prompts'].extend(valid_boxes)
-        #                 self.prompts['labels'].extend(valid_labels)
-        #                 self.prompts['scores'].extend(valid_scores)
-        #                 self.add_new = True
-        #             elif len(valid_boxes) > 0:
-        #                 print(f"Checking {len(valid_boxes)} YOLO detections with feature matching...")
-                        
-        #                 valid_masks, mask_scores = self.convert_boxes_to_masks(frame, valid_boxes)
-        #                 new_features = self.extract_features_from_boxes(frame, valid_boxes)
-                        
-        #                 matched_boxes, matched_labels = self.match_features(
-        #                     new_features, valid_masks, valid_labels
-        #                 )
-                        
-        #                 if len(matched_boxes) > 0:
-        #                     print(f"  Adding {len(matched_boxes)} new detections after feature matching")
-        #                     self.prompts['prompts'].extend(matched_boxes)
-        #                     self.prompts['labels'].extend(matched_labels)
-        #                     self.prompts['scores'].extend([None] * len(matched_boxes))
-        #                     self.add_new = True
-        #                 else:
-        #                     print(f"  No new detections to add - all {len(valid_boxes)} detections matched existing objects")
-
-        #         self.last_text_prompt = self.current_text_prompt
 
         #---------- Start of <Feature match with mode numner of detection>------------
         with torch.inference_mode(), torch.autocast("cuda", dtype=torch.float16):
@@ -1050,11 +870,9 @@ class Sort(object):
                     for frame_idx in range(start_frame, current_frame_num + 1):
                         self.cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
                         ret, lookback_frame = self.cap.read()
-                        
                         if not ret:
                             continue
-                        
-                        detection = self.yolo.detect([lookback_frame], classes=[14])[0]
+                        detection = self.yolo.detect([lookback_frame], classes=[3, 14])[0]
                         
                         scores = detection['scores'].cpu().numpy()
                         labels = detection['labels']
