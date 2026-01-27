@@ -14,6 +14,7 @@ import time
 import numpy as np
 from icecream import ic
 import os
+
 class BboxDrawer:
     def __init__(self, image):
         self.image = image.copy()
