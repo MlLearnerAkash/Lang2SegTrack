@@ -148,7 +148,7 @@ class Sort(object):
         else:
             self.prompts = {'prompts': [], 'labels': [], 'scores': []}
         self.iou_threshold = 0.3
-        self.detection_frequency =30
+        self.detection_frequency = 30
         self.object_labels = {}
         self.last_known_bboxes = {}
 
@@ -833,7 +833,7 @@ class Sort(object):
         return self.classwise_count
 
 
-    def process_frame(self):
+    def process_frame(self, classes=None):
         """Process a single frame. Returns False if video ended."""
         if not self.initialized:
             self.initialize_tracking()
@@ -872,8 +872,8 @@ class Sort(object):
                         ret, lookback_frame = self.cap.read()
                         if not ret:
                             continue
-                        detection = self.yolo.detect([lookback_frame], classes=[3, 14])[0]
                         
+                        detection = self.yolo.detect([lookback_frame], classes=classes if classes is not None else [i for i in range(len(self.yolo.names))])[0] #, 
                         scores = detection['scores'].cpu().numpy()
                         labels = detection['labels']
                         boxes = detection['boxes'].cpu().numpy().tolist()

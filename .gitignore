@@ -191,3 +191,5 @@ cython_debug/
 
 # Other
 .DS_Store
+
+multi_cam/output/**output/
