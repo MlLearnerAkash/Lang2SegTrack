@@ -10,7 +10,7 @@ class YOLODetector:
     """
     YOLO object detector class that loads models and performs inference.
     """
-    def __init__(self, model_path, conf_thres=0.45, iou_thres=0.25, device='cuda:0', ):
+    def __init__(self, model_path, conf_thres=0.45, iou_thres=0.25, device='cuda:0', imgsz= 2480):
         """
         Initialize the YOLO detector with a model.
 
@@ -19,10 +19,12 @@ class YOLODetector:
             conf_thres (float): Confidence threshold for detections
             iou_thres (float): IoU threshold for NMS
             device (str): Device to run inference on ('cuda:0', 'cpu', etc.)
+            imgsz (int): Image size for inference
         """
         self.conf_thres = conf_thres
         self.iou_thres = iou_thres
         self.device = device
+        self.imgsz = imgsz
         
         # Load the model
         self.model = self._load_model(model_path)
@@ -66,7 +68,8 @@ class YOLODetector:
                 iou=self.iou_thres, 
                 device=self.device, 
                 classes=classes,
-                verbose=False
+                verbose=False,
+                imgsz= self.imgsz
             )
             
             if return_raw:

@@ -1,2 +1,0 @@
-- [ ] Update the SORT algorithm based on YOLO features.
-- [ ] Integrate SAMURAI tracking to both cameras.
